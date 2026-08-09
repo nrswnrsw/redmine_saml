@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 gem 'omniauth-rails_csrf_protection'
-gem 'omniauth-saml'
+gem 'omniauth-saml', '>= 2.2.4'
 gem 'redmine_plugin_kit'
 gem 'slim-rails'
 
