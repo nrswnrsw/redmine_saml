@@ -12,7 +12,10 @@ jobs:
     strategy:
       matrix:
         ruby: ['3.3']
-        redmine: ['7.0-stable']
+        redmine: 
+          - '6.0-stable'
+          - '6.1-stable'
+          - '7.0-stable'
         db: ['postgres']
       fail-fast: false
 
