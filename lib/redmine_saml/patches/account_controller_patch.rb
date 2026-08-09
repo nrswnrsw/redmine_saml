@@ -9,6 +9,7 @@ module RedmineSaml
 
       included do
         prepend InstanceOverwriteMethods
+
         helper :omniauth_saml_account
 
         before_action :verify_authenticity_token, except: [:login_with_saml_callback]

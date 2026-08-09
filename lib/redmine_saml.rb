@@ -26,17 +26,9 @@ module RedmineSaml
       setting :saml_login_label
     end
 
-    def user_attributes_from_saml(omniauth)
-      Base.user_attributes_from_saml omniauth
-    end
-
-    def configured_saml
-      Base.configured_saml
-    end
-
-    def on_login_callback
-      Base.on_login_callback
-    end
+    delegate :user_attributes_from_saml, to: :Base
+    delegate :configured_saml, to: :Base
+    delegate :on_login_callback, to: :Base
 
     private
 
