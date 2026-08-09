@@ -3,6 +3,7 @@
 gem 'omniauth-rails_csrf_protection'
 gem 'omniauth-saml'
 gem 'redmine_plugin_kit'
+gem 'slim-rails'
 
 group :test do
   gem 'shoulda'
