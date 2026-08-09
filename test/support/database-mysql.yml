@@ -6,3 +6,5 @@ test:
   username: root
   password: BestPasswordEver
   encoding: utf8mb4
+  variables:
+    transaction_isolation: READ-COMMITTED
