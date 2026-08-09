@@ -6,7 +6,8 @@ gem 'redmine_plugin_kit'
 gem 'slim-rails'
 
 group :test do
-  gem 'shoulda'
+  gem 'shoulda-context', '3.0.0.rc1'
+  gem 'shoulda-matchers'
 end
 
 group :development do
