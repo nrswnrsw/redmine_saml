@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'authentication_gate'
+
 module RedmineSaml
   class Base
     class << self
@@ -96,6 +98,7 @@ module RedmineSaml
 
       def configure_omniauth_saml_middleware
         saml_options = configured_saml
+        Rails.application.config.middleware.use ::RedmineSaml::AuthenticationGate
         Rails.application.config.middleware.use ::OmniAuth::Builder do
           provider :saml, saml_options
         end

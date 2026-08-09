@@ -12,6 +12,7 @@ module RedmineSaml
 
         helper :omniauth_saml_account
 
+        before_action :require_saml_enabled, only: %i[login_with_saml_redirect login_with_saml_callback]
         before_action :verify_authenticity_token, except: [:login_with_saml_callback]
       end
 
@@ -175,6 +176,10 @@ module RedmineSaml
         end
 
         private
+
+        def require_saml_enabled
+          redirect_to signin_url unless RedmineSaml.enabled?
+        end
 
         def saml_logout_user
           logout_user

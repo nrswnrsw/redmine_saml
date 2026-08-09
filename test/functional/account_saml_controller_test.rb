@@ -19,6 +19,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     should "show up only if there's a plugin setting for SAML URL" do
       change_saml_settings saml_enabled: 0
       get :login
+      assert_response :success
       assert_select '#saml-login', 0
 
       change_saml_settings saml_enabled: 1
@@ -27,7 +28,34 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     end
   end
 
+  context 'GET login_with_saml_redirect' do
+    should 'redirect to /login without starting SAML authentication when SAML is disabled' do
+      change_saml_settings saml_enabled: 0
+
+      get :login_with_saml_redirect,
+          params: { provider: 'saml' }
+
+      assert_redirected_to '/login'
+      assert_nil session[:user_id]
+      assert_not session[:logged_in_with_saml]
+      assert_equal User.anonymous, User.current
+    end
+  end
+
   context 'GET login_with_saml_callback' do
+    should 'refuse an existing user without creating a session when SAML is disabled' do
+      change_saml_settings saml_enabled: 0
+      request.env['omniauth.auth'] = { 'saml_login' => 'admin' }
+
+      get :login_with_saml_callback,
+          params: { provider: 'saml' }
+
+      assert_redirected_to '/login'
+      assert_nil session[:user_id]
+      assert_not session[:logged_in_with_saml]
+      assert_equal User.anonymous, User.current
+    end
+
     should 'redirect to /my/page after successful login' do
       request.env['omniauth.auth'] = { 'saml_login' => 'admin' }
       get :login_with_saml_callback,

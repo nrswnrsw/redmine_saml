@@ -11,6 +11,36 @@ class AccountSAMLTest < Redmine::IntegrationTest
     prepare_tests
   end
 
+  context 'SAML authentication when disabled' do
+    setup do
+      Setting.default_language = 'en'
+      change_saml_settings saml_enabled: 0,
+                           onthefly_creation: 0
+
+      OmniAuth.config.test_mode = true
+    end
+
+    should 'reject the SAML request phase before OmniAuth starts authentication' do
+      post '/auth/saml'
+
+      assert_redirected_to '/login'
+      follow_redirect!
+      assert_equal User.anonymous, User.current
+    end
+
+    should 'reject an IdP-initiated callback for an existing user' do
+      OmniAuth.config.mock_auth[:saml] = { 'saml_login' => 'admin' }
+
+      post RedmineSaml::CALLBACK_PATH
+
+      assert_redirected_to '/login'
+      assert_nil session[:user_id]
+      assert_not session[:logged_in_with_saml]
+      follow_redirect!
+      assert_equal User.anonymous, User.current
+    end
+  end
+
   context 'GET /auth/:provider/callback' do
     context 'OmniAuth SAML strategy' do
       setup do
