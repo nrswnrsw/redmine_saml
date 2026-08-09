@@ -11,12 +11,39 @@ jobs:
 
     strategy:
       matrix:
-        ruby: ['3.3']
-        redmine: 
-          - '6.0-stable'
-          - '6.1-stable'
-          - '7.0-stable'
-        db: ['postgres']
+        include:
+          - redmine: '6.0-stable'
+            ruby: '3.1'
+            db: 'postgres'
+          - redmine: '6.0-stable'
+            ruby: '3.2'
+            db: 'postgres'
+          - redmine: '6.0-stable'
+            ruby: '3.3'
+            db: 'postgres'
+
+          - redmine: '6.1-stable'
+            ruby: '3.2'
+            db: 'postgres'
+          - redmine: '6.1-stable'
+            ruby: '3.3'
+            db: 'postgres'
+          - redmine: '6.1-stable'
+            ruby: '3.4'
+            db: 'postgres'
+
+          - redmine: '7.0-stable'
+            ruby: '3.2'
+            db: 'postgres'
+          - redmine: '7.0-stable'
+            ruby: '3.3'
+            db: 'postgres'
+          - redmine: '7.0-stable'
+            ruby: '3.4'
+            db: 'postgres'
+          - redmine: '7.0-stable'
+            ruby: '4.0'
+            db: 'postgres'
       fail-fast: false
 
     services:
