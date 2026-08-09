@@ -28,7 +28,7 @@ class AccountSAMLTest < Redmine::IntegrationTest
         assert_redirected_to '/my/page'
 
         get '/my/page'
-        assert_match(/Logged in as.*admin/im, response.body)
+        assert_select 'div.flyout-menu__avatar a.user.active', text: 'admin'
       end
 
       should 'authorize login if user exists with this mail' do
@@ -38,7 +38,7 @@ class AccountSAMLTest < Redmine::IntegrationTest
         assert_redirected_to '/my/page'
 
         get '/my/page'
-        assert_match(/Logged in as.*admin/im, response.body)
+        assert_select 'div.flyout-menu__avatar a.user.active', text: 'admin'
       end
 
       should 'update last_login_on field' do
