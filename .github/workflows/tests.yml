@@ -1,7 +1,15 @@
 name: Tests
 on:
   push:
+    paths-ignore:
+      - '.github/workflows/linters.yml'
+      - '.github/workflows/e2e.yml'
+      - 'test/e2e/**'
   pull_request:
+    paths-ignore:
+      - '.github/workflows/linters.yml'
+      - '.github/workflows/e2e.yml'
+      - 'test/e2e/**'
   workflow_dispatch:
 
 jobs:
