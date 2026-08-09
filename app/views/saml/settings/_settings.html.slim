@@ -1,11 +1,18 @@
 p
-  = additionals_settings_checkbox :saml_enabled
+  = label_tag 'settings[saml_enabled]', l(:label_saml_enabled)
+  = hidden_field_tag 'settings[saml_enabled]', 0, id: nil
+  = check_box_tag 'settings[saml_enabled]', 1, @settings[:saml_enabled].to_s == '1'
 
 p
-  = additionals_settings_textfield :saml_login_label, size: 60
+  = label_tag 'settings[saml_login_label]', l(:label_saml_login_label)
+  = text_field_tag 'settings[saml_login_label]', @settings[:saml_login_label], size: 60
 
 p
-  = additionals_settings_checkbox :replace_redmine_login
+  = label_tag 'settings[replace_redmine_login]', l(:label_replace_redmine_login)
+  = hidden_field_tag 'settings[replace_redmine_login]', 0, id: nil
+  = check_box_tag 'settings[replace_redmine_login]', 1, @settings[:replace_redmine_login].to_s == '1'
 
 p
-  = additionals_settings_checkbox :onthefly_creation
+  = label_tag 'settings[onthefly_creation]', l(:label_onthefly_creation)
+  = hidden_field_tag 'settings[onthefly_creation]', 0, id: nil
+  = check_box_tag 'settings[onthefly_creation]', 1, @settings[:onthefly_creation].to_s == '1'
