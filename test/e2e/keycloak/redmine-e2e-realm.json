@@ -1,0 +1,99 @@
+{
+  "realm": "redmine-e2e",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+
+  "users": [
+    {
+      "username": "samltest",
+      "enabled": true,
+      "firstName": "SAML",
+      "lastName": "Test",
+      "email": "samltest@example.invalid",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "samltest-password",
+          "temporary": false
+        }
+      ]
+    }
+  ],
+
+  "clients": [
+    {
+      "clientId": "http://127.0.0.1:3000/auth/saml/metadata",
+      "name": "Redmine E2E",
+      "enabled": true,
+      "protocol": "saml",
+      "rootUrl": "http://127.0.0.1:3000",
+      "baseUrl": "/",
+      "adminUrl": "http://127.0.0.1:3000/auth/saml/callback",
+      "redirectUris": [
+        "http://127.0.0.1:3000/auth/saml/callback"
+      ],
+      "frontchannelLogout": true,
+      "attributes": {
+        "saml.assertion.signature": "true",
+        "saml.server.signature": "true",
+        "saml.force.post.binding": "true",
+        "saml.signature.algorithm": "RSA_SHA256",
+        "saml.authnstatement": "true",
+        "saml_name_id_format": "persistent",
+        "saml_force_name_id_format": "true",
+        "saml_assertion_consumer_url_post": "http://127.0.0.1:3000/auth/saml/callback",
+        "saml_single_logout_service_url_post": "http://127.0.0.1:3000/auth/saml/sls",
+        "saml_idp_initiated_sso_url_name": "redmine"
+      },
+
+      "protocolMappers": [
+        {
+          "name": "username",
+          "protocol": "saml",
+          "protocolMapper": "saml-user-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "attribute.nameformat": "Basic",
+            "user.attribute": "username",
+            "attribute.name": "username"
+          }
+        },
+        {
+          "name": "email",
+          "protocol": "saml",
+          "protocolMapper": "saml-user-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "attribute.nameformat": "Basic",
+            "user.attribute": "email",
+            "attribute.name": "email"
+          }
+        },
+        {
+          "name": "firstname",
+          "protocol": "saml",
+          "protocolMapper": "saml-user-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "attribute.nameformat": "Basic",
+            "user.attribute": "firstName",
+            "attribute.name": "firstname"
+          }
+        },
+        {
+          "name": "lastname",
+          "protocol": "saml",
+          "protocolMapper": "saml-user-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "attribute.nameformat": "Basic",
+            "user.attribute": "lastName",
+            "attribute.name": "lastname"
+          }
+        }
+      ]
+    }
+  ]
+}
