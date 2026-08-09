@@ -1,0 +1,287 @@
+name: SAML E2E
+
+on:
+  push:
+    branches:
+      - redmine-7-support
+    paths:
+      - '.github/workflows/e2e.yml'
+      - 'test/e2e/**'
+      - 'app/**'
+      - 'config/**'
+      - 'lib/**'
+      - 'Gemfile'
+      - 'init.rb'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RAILS_ENV: test
+  REDMINE_LANG: en
+
+jobs:
+  saml-e2e:
+    name: Redmine 7 / Ruby 3.4 / Keycloak
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Redmine
+        uses: actions/checkout@v4
+        with:
+          repository: redmine/redmine
+          ref: 7.0-stable
+          path: redmine
+
+      - name: Checkout redmine_saml
+        uses: actions/checkout@v4
+        with:
+          path: redmine/plugins/redmine_saml
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update --yes --quiet
+          sudo apt-get install --yes --quiet \
+            build-essential \
+            cmake \
+            libicu-dev \
+            libpq-dev
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+
+      - name: Prepare Redmine configuration
+        run: |
+          cp redmine/plugins/redmine_saml/test/support/database-postgres.yml \
+             redmine/config/database.yml
+
+          cp redmine/plugins/redmine_saml/test/support/configuration.yml \
+             redmine/config/configuration.yml
+
+      - name: Install Ruby dependencies
+        working-directory: redmine
+        run: |
+          bundle config set --local without 'development'
+          bundle install --jobs=4 --retry=3
+
+      - name: Start Keycloak
+        run: |
+          docker run -d \
+            --name redmine-saml-keycloak \
+            -p 127.0.0.1:8080:8080 \
+            --memory 1g \
+            -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+            -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
+            -v "${{ github.workspace }}/redmine/plugins/redmine_saml/test/e2e/keycloak:/opt/keycloak/data/import:ro" \
+            quay.io/keycloak/keycloak:26.7.1 \
+            start-dev --import-realm
+
+      - name: Wait for Keycloak
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS \
+              http://127.0.0.1:8080/realms/redmine-e2e/protocol/saml/descriptor \
+              >/dev/null; then
+              echo "Keycloak is ready"
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          echo "Keycloak did not become ready"
+          docker logs redmine-saml-keycloak
+          exit 1
+
+      - name: Generate SAML configuration
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.request import urlopen
+          import xml.etree.ElementTree as ET
+          import json
+
+          metadata_url = (
+              "http://127.0.0.1:8080/"
+              "realms/redmine-e2e/protocol/saml/descriptor"
+          )
+
+          metadata = urlopen(metadata_url).read()
+          root = ET.fromstring(metadata)
+
+          ns = {
+              "md": "urn:oasis:names:tc:SAML:2.0:metadata",
+              "ds": "http://www.w3.org/2000/09/xmldsig#",
+          }
+
+          cert_node = root.find(
+              ".//md:IDPSSODescriptor/"
+              "md:KeyDescriptor[@use='signing']//ds:X509Certificate",
+              ns,
+          )
+
+          if cert_node is None:
+              cert_node = root.find(".//ds:X509Certificate", ns)
+
+          if cert_node is None or not cert_node.text:
+              raise SystemExit(
+                  "ERROR: signing certificate not found in Keycloak metadata"
+              )
+
+          cert_data = "".join(cert_node.text.split())
+
+          cert_lines = [
+              cert_data[i:i + 64]
+              for i in range(0, len(cert_data), 64)
+          ]
+
+          pem = (
+              "-----BEGIN CERTIFICATE-----\n"
+              + "\n".join(cert_lines)
+              + "\n-----END CERTIFICATE-----\n"
+          )
+
+          ruby = f"""# frozen_string_literal: true
+
+          require Rails.root.join('plugins/redmine_saml/lib/redmine_saml')
+          require Rails.root.join('plugins/redmine_saml/lib/redmine_saml/base')
+
+          RedmineSaml::Base.configure do |config|
+            config.saml = {{
+              assertion_consumer_service_url: 'http://127.0.0.1:3000/auth/saml/callback',
+              sp_entity_id: 'http://127.0.0.1:3000/auth/saml/metadata',
+              single_logout_service_url: 'http://127.0.0.1:3000/auth/saml/sls',
+
+              idp_sso_service_url: 'http://127.0.0.1:8080/realms/redmine-e2e/protocol/saml/clients/redmine',
+              idp_slo_service_url: 'http://127.0.0.1:8080/realms/redmine-e2e/protocol/saml',
+
+              idp_cert: {json.dumps(pem)},
+
+              name_identifier_format: 'urn:oasis:names:tc:SAML:2.0:nameid-format:persistent',
+              name_identifier_value: 'mail',
+
+              attribute_mapping: {{
+                login: 'extra|raw_info|username',
+                mail: 'extra|raw_info|email',
+                firstname: 'extra|raw_info|firstname',
+                lastname: 'extra|raw_info|lastname'
+              }}
+            }}
+          end
+          """
+
+          Path(
+              "redmine/config/initializers/saml_e2e.rb"
+          ).write_text(ruby)
+
+          print("Generated Redmine SAML configuration")
+          PY
+
+      - name: Prepare Redmine database
+        working-directory: redmine
+        run: |
+          bundle exec rake generate_secret_token
+
+          bundle exec rake \
+            db:create \
+            db:migrate \
+            redmine:plugins:migrate
+
+          bundle exec rake redmine:load_default_data
+
+          cat > /tmp/create_e2e_user.rb <<'RUBY'
+          user = User.find_or_initialize_by(login: 'samltest')
+
+          user.firstname = 'SAML'
+          user.lastname = 'Test'
+          user.mail = 'samltest@example.invalid'
+          user.language = 'en'
+
+          user.password = 'redmine-password'
+          user.password_confirmation = 'redmine-password'
+
+          user.activate
+          user.save!
+
+          puts "Created Redmine E2E user: #{user.login}"
+          RUBY
+
+          bundle exec rails runner /tmp/create_e2e_user.rb
+
+      - name: Start Redmine
+        working-directory: redmine
+        run: |
+          nohup bundle exec rails server \
+            -b 127.0.0.1 \
+            -p 3000 \
+            > /tmp/redmine-e2e.log 2>&1 &
+
+          echo $! > /tmp/redmine-e2e.pid
+
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3000/login >/dev/null; then
+              echo "Redmine is ready"
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          echo "Redmine did not become ready"
+          cat /tmp/redmine-e2e.log
+          exit 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Playwright
+        working-directory: redmine/plugins/redmine_saml/test/e2e
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Run real SAML login test
+        working-directory: redmine/plugins/redmine_saml/test/e2e
+        run: npx playwright test
+
+      - name: Collect failure logs
+        if: failure()
+        run: |
+          mkdir -p \
+            redmine/plugins/redmine_saml/test/e2e/artifacts
+
+          cp /tmp/redmine-e2e.log \
+            redmine/plugins/redmine_saml/test/e2e/artifacts/redmine.log \
+            2>/dev/null || true
+
+          docker logs redmine-saml-keycloak \
+            > redmine/plugins/redmine_saml/test/e2e/artifacts/keycloak.log \
+            2>&1 || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: saml-e2e-debug
+          path: |
+            redmine/plugins/redmine_saml/test/e2e/test-results
+            redmine/plugins/redmine_saml/test/e2e/artifacts
