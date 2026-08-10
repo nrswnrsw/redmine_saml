@@ -31,6 +31,14 @@ function isRedmineSlsRequest(request, parameter) {
     samlParameter(request, parameter);
 }
 
+function isRedmineLogoutRequest(request) {
+  const url = new URL(request.url());
+
+  return url.origin === REDMINE_ORIGIN &&
+    url.pathname === '/logout' &&
+    request.method() === 'POST';
+}
+
 function decodeRedirectMessage(message) {
   return zlib.inflateRawSync(Buffer.from(message, 'base64')).toString('utf8');
 }
@@ -88,17 +96,7 @@ test('log out of Redmine and Keycloak through real SAML SLO', async ({ page }) =
     page.locator('div.flyout-menu__avatar a.user.active')
   ).toHaveText('samltest');
 
-  await page.locator('#account .dropdown-trigger').click();
-  await page.getByRole('link', { name: 'Sign out', exact: true }).click();
-
-  await expect(page).toHaveURL(`${REDMINE_ORIGIN}/logout`);
-
-  const logoutForm = page.locator('form[action="/logout"]');
-  await expect(logoutForm).toHaveAttribute('method', /post/i);
-  await expect(
-    logoutForm.locator('input[name="authenticity_token"]')
-  ).toHaveAttribute('value', /.+/);
-
+  const redmineLogoutRequestPromise = page.waitForRequest(isRedmineLogoutRequest);
   const keycloakLogoutRequestPromise = page.waitForRequest(
     request => isKeycloakSamlRequest(request, 'SAMLRequest')
   );
@@ -109,13 +107,20 @@ test('log out of Redmine and Keycloak through real SAML SLO', async ({ page }) =
     response => isRedmineSlsRequest(response.request(), 'SAMLResponse')
   );
 
-  await logoutForm.getByRole('button', { name: 'Sign out' }).click();
+  await page.locator('#account .dropdown-trigger').click();
+  await page.getByRole('link', { name: 'Sign out', exact: true }).click();
 
-  const [keycloakLogoutRequest, redmineLogoutResponse, redmineSlsResponse] = await Promise.all([
+  const [redmineLogoutRequest, keycloakLogoutRequest, redmineLogoutResponse, redmineSlsResponse] = await Promise.all([
+    redmineLogoutRequestPromise,
     keycloakLogoutRequestPromise,
     redmineLogoutResponsePromise,
     redmineSlsResponsePromise
   ]);
+
+  expect(redmineLogoutRequest.method()).toBe('POST');
+  expect(
+    new URLSearchParams(redmineLogoutRequest.postData() || '').get('authenticity_token')
+  ).toBeTruthy();
 
   expect(keycloakLogoutRequest.method()).toBe('GET');
   const logoutRequestXml = decodeRedirectMessage(

@@ -14,7 +14,7 @@ module RedmineSaml
       return @app.call env unless disabled_saml_authentication_path? env
 
       [302,
-       { 'location' => "#{env['SCRIPT_NAME'].to_s.chomp('/')}/login",
+       { 'location' => "#{env['SCRIPT_NAME'].to_s.chomp '/'}/login",
          'content-type' => 'text/html; charset=utf-8',
          'content-length' => '0' },
        []]

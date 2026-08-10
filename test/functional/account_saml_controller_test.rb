@@ -159,7 +159,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       RedmineSaml.configured_saml.delete :idp_entity_id
       assert RedmineSaml.enabled?
 
-      get :login_with_saml_redirect
+      get :login_with_saml_redirect, params: { provider: 'saml' }
       assert_redirected_to RedmineSaml.configured_saml[:idp_sso_service_url]
 
       RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
@@ -175,7 +175,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       RedmineSaml.configured_saml.delete :idp_entity_id
       assert RedmineSaml.enabled?
 
-      get :login_with_saml_redirect
+      get :login_with_saml_redirect, params: { provider: 'saml' }
       assert_redirected_to RedmineSaml.configured_saml[:idp_sso_service_url]
 
       RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
@@ -210,6 +210,13 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
 
     should 'keep the session when a plain GET has no SAML message' do
       get :redirect_after_saml_logout
+
+      assert_response :bad_request
+      assert_saml_session_active
+    end
+
+    should 'keep the session when HEAD carries a LogoutRequest' do
+      head :redirect_after_saml_logout, params: signed_logout_request_params
 
       assert_response :bad_request
       assert_saml_session_active
@@ -403,7 +410,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
         sig_alg: logout_params['SigAlg']
       )
       signature = Base64.strict_decode64 logout_params['Signature']
-      digest = OpenSSL::Digest::SHA256.new
+      digest = OpenSSL::Digest.new 'SHA256'
 
       assert_equal logout_params, Rack::Utils.parse_query(raw_query)
       assert_not_equal normalized_query, signed_query
@@ -603,7 +610,8 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
         certificate.public_key = slo_test_private_key.public_key
         certificate.not_before = Time.now.utc - 3600
         certificate.not_after = Time.now.utc + 86_400
-        certificate.sign slo_test_private_key, OpenSSL::Digest::SHA256.new
+        digest = OpenSSL::Digest.new 'SHA256'
+        certificate.sign slo_test_private_key, digest
         certificate
       end
     end
@@ -619,7 +627,8 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
         certificate.public_key = slo_test_private_key.public_key
         certificate.not_before = Time.now.utc - 7200
         certificate.not_after = Time.now.utc - 3600
-        certificate.sign slo_test_private_key, OpenSSL::Digest::SHA256.new
+        digest = OpenSSL::Digest.new 'SHA256'
+        certificate.sign slo_test_private_key, digest
         certificate
       end
     end
@@ -696,9 +705,10 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       "SigAlg=#{alternate_percent_encode(decoded_params.fetch('SigAlg'))}"
     ]
     signed_query = signed_components.join '&'
-    signature = self.class.slo_test_private_key.sign OpenSSL::Digest::SHA256.new, signed_query
+    digest = OpenSSL::Digest.new 'SHA256'
+    signature = self.class.slo_test_private_key.sign digest, signed_query
     decoded_params['Signature'] = Base64.strict_encode64 signature
-    raw_query = "#{signed_query}&Signature=#{alternate_percent_encode(decoded_params['Signature'])}"
+    raw_query = "#{signed_query}&Signature=#{alternate_percent_encode decoded_params['Signature']}"
 
     result = [decoded_params, raw_query]
     result << signed_query if include_signed_query
@@ -707,7 +717,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
 
   def alternate_percent_encode(value)
     CGI.escape(value.to_s)
-       .gsub(/%[0-9A-F]{2}/) { |escape| escape.downcase }
+       .gsub(/%[0-9A-F]{2}/, &:downcase)
        .sub('test.host', 'test%2ehost')
   end
 

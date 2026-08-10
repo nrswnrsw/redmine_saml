@@ -4,6 +4,10 @@ require File.expand_path "#{File.dirname __FILE__}/../../../test/test_helper"
 
 module RedmineSaml
   module TestHelper
+    def self.included(base)
+      base.teardown :restore_saml_settings
+    end
+
     def attribute_mapping_mock
       { login: 'saml_login',
         firstname: 'first_name',
@@ -18,12 +22,19 @@ module RedmineSaml
     end
 
     def change_saml_settings(settings)
-      @saved_settings = Setting.plugin_redmine_saml.dup
+      @saved_settings ||= Setting.plugin_redmine_saml.dup
       new_settings = Setting.plugin_redmine_saml.dup
       settings.each do |key, value|
         new_settings[key] = value
       end
       Setting.plugin_redmine_saml = new_settings
+    end
+
+    def restore_saml_settings
+      return unless instance_variable_defined? :@saved_settings
+
+      Setting.plugin_redmine_saml = @saved_settings
+      remove_instance_variable :@saved_settings
     end
   end
 

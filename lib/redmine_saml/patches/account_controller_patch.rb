@@ -84,7 +84,7 @@ module RedmineSaml
         end
 
         def logout
-          if RedmineSaml.enabled? && session[:logged_in_with_saml] && request.post?
+          if RedmineSaml.enabled? && session[:logged_in_with_saml] && saml_post_binding_request?
             sp_logout_request
           else
             super
@@ -93,16 +93,16 @@ module RedmineSaml
 
         # Method to handle IdP initiated logouts
         def idp_logout_request
-          return reject_saml_logout('no active SAML session') unless active_saml_logout_session?
-          return reject_saml_logout('missing SAML signature') unless valid_saml_signature_parameters?
+          return reject_saml_logout 'no active SAML session' unless active_saml_logout_session?
+          return reject_saml_logout 'missing SAML signature' unless valid_saml_signature_parameters?
 
           settings = OneLogin::RubySaml::Settings.new omniauth_saml_settings
-          return reject_saml_logout('SAML message is too large') unless valid_saml_message_size?(params[:SAMLRequest], settings)
+          return reject_saml_logout 'SAML message is too large' unless valid_saml_message_size? params[:SAMLRequest], settings
 
           options = { settings: settings }
-          if request.get?
+          if saml_redirect_binding_request?
             query_options = saml_redirect_query_options
-            return reject_saml_logout('duplicate SAML query parameter') if query_options.blank?
+            return reject_saml_logout 'duplicate SAML query parameter' if query_options.blank?
 
             options.merge! query_options
           end
@@ -113,7 +113,7 @@ module RedmineSaml
                   valid_saml_message_context?(logout_request, settings) &&
                   valid_saml_name_id?(logout_request.name_id) &&
                   valid_saml_session_index?(logout_request.session_indexes)
-          return reject_saml_logout('invalid LogoutRequest') unless valid
+          return reject_saml_logout 'invalid LogoutRequest' unless valid
 
           logger.info "IdP initiated Logout for #{logout_request.name_id}"
 
@@ -134,17 +134,17 @@ module RedmineSaml
         # After sending an SP initiated LogoutRequest to the IdP, accept and verify
         # the LogoutResponse, then finish the already-local logout transaction.
         def process_logout_response
-          return reject_saml_logout('no active or pending SAML logout') unless valid_saml_logout_response_session?
-          return reject_saml_logout('missing SAML transaction ID') if session[:transaction_id].blank?
-          return reject_saml_logout('missing SAML signature') unless valid_saml_signature_parameters?
+          return reject_saml_logout 'no active or pending SAML logout' unless valid_saml_logout_response_session?
+          return reject_saml_logout 'missing SAML transaction ID' if session[:transaction_id].blank?
+          return reject_saml_logout 'missing SAML signature' unless valid_saml_signature_parameters?
 
           settings = OneLogin::RubySaml::Settings.new omniauth_saml_settings
-          return reject_saml_logout('SAML message is too large') unless valid_saml_message_size?(params[:SAMLResponse], settings)
+          return reject_saml_logout 'SAML message is too large' unless valid_saml_message_size? params[:SAMLResponse], settings
 
           options = { matches_request_id: session[:transaction_id] }
-          if request.get?
+          if saml_redirect_binding_request?
             query_options = saml_redirect_query_options
-            return reject_saml_logout('duplicate SAML query parameter') if query_options.blank?
+            return reject_saml_logout 'duplicate SAML query parameter' if query_options.blank?
 
             options.merge! query_options
           end
@@ -161,7 +161,7 @@ module RedmineSaml
           valid = logout_response.validate &&
                   valid_post_saml_signature?(logout_response.document, settings) &&
                   valid_saml_message_context?(logout_response, settings)
-          return reject_saml_logout('invalid LogoutResponse') unless valid
+          return reject_saml_logout 'invalid LogoutResponse' unless valid
 
           if active_saml_logout_session?
             logger.info "Delete session for '#{User.current.login}'"
@@ -208,6 +208,8 @@ module RedmineSaml
 
         # Manage SLS response
         def redirect_after_saml_logout
+          return reject_saml_logout 'unsupported SAML logout HTTP method' unless saml_redirect_binding_request? || saml_post_binding_request?
+
           if params[:SAMLRequest].present? && params[:SAMLResponse].blank?
             idp_logout_request
           elsif params[:SAMLResponse].present? && params[:SAMLRequest].blank?
@@ -232,9 +234,17 @@ module RedmineSaml
         end
 
         def valid_saml_signature_parameters?
-          return params[:Signature].present? && params[:SigAlg].present? if request.get?
+          return params[:Signature].present? && params[:SigAlg].present? if saml_redirect_binding_request?
 
-          request.post?
+          saml_post_binding_request?
+        end
+
+        def saml_redirect_binding_request?
+          request.request_method == 'GET'
+        end
+
+        def saml_post_binding_request?
+          request.request_method == 'POST'
         end
 
         def saml_query_parameters
@@ -246,7 +256,7 @@ module RedmineSaml
           parameter_counts = Hash.new 0
 
           request.query_string.to_s.split('&').each do |query_component|
-            encoded_name, encoded_value = query_component.split('=', 2)
+            encoded_name, encoded_value = query_component.split '=', 2
             name = Rack::Utils.unescape encoded_name.to_s
             next unless SAML_REDIRECT_QUERY_PARAMETERS.include? name
 
@@ -294,8 +304,8 @@ module RedmineSaml
         end
 
         def valid_post_saml_signature?(document, settings)
-          return true if request.get?
-          return false unless request.post?
+          return true if saml_redirect_binding_request?
+          return false unless saml_post_binding_request?
 
           signed_document = XMLSecurity::SignedDocument.new document.to_s
           root_id = signed_document.root&.attributes&.[]('ID').to_s
@@ -305,10 +315,12 @@ module RedmineSaml
           namespaces = { 'ds' => XMLSecurity::BaseDocument::DSIG }
           signatures = REXML::XPath.match signed_document, '//ds:Signature', namespaces
           root_signatures = REXML::XPath.match signed_document.root, './ds:Signature', namespaces
-          elements_with_signed_id = REXML::XPath.match signed_document,
-                                                        '//*[@ID=$id]',
-                                                        {},
-                                                        { 'id' => signed_element_id }
+          elements_with_signed_id = REXML::XPath.match(
+            signed_document,
+            '//*[@ID=$id]',
+            {},
+            { 'id' => signed_element_id }
+          )
           return false unless signatures.one? && root_signatures.one? && elements_with_signed_id.one?
 
           valid_post_saml_certificate_signature? signed_document, settings
@@ -343,7 +355,7 @@ module RedmineSaml
 
         def saml_signature_certificate(signed_document)
           namespaces = { 'ds' => XMLSecurity::BaseDocument::DSIG }
-          certificates = REXML::XPath.match(signed_document, '//ds:X509Certificate', namespaces)
+          certificates = REXML::XPath.match signed_document, '//ds:X509Certificate', namespaces
           signature_certificates = REXML::XPath.match(
             signed_document.root,
             './ds:Signature/ds:KeyInfo/ds:X509Data/ds:X509Certificate',
