@@ -57,14 +57,17 @@ module RedmineSaml
               flash[:error] = error
               redirect_to signin_url
             end
+          elsif !user.active?
+            handle_saml_inactive_user user
           else
-            user.update_column :last_login_on, Time.zone.now
+            user.update_last_login_on!
             params[:back_url] = request.env['omniauth.origin'] if request.env['omniauth.origin'].present?
             saml_uid = session['saml_uid']
             saml_session_index = session['saml_session_index']
-            successful_authentication user
+            handle_active_user user
 
-            # cannot be set earlier, because sucessful_authentication() triggers reset_session()
+            # Cannot be set earlier because handle_active_user() calls
+            # successful_authentication(), which resets the session.
             session[:logged_in_with_saml] = true
             session['saml_uid'] = saml_uid if saml_uid.present?
             session['saml_session_index'] = saml_session_index if saml_session_index.present?
@@ -222,6 +225,15 @@ module RedmineSaml
         end
 
         private
+
+        def handle_saml_inactive_user(user)
+          if RedmineSaml.replace_redmine_login?
+            message = user.registered? ? :notice_account_pending : :notice_account_locked
+            render_error message: message, status: 403
+          else
+            handle_inactive_user user
+          end
+        end
 
         def require_saml_enabled
           redirect_to signin_url unless RedmineSaml.enabled?

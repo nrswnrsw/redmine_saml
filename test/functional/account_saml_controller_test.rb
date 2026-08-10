@@ -69,12 +69,29 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       assert_equal User.anonymous, User.current
     end
 
-    should 'redirect to /my/page after successful login' do
+    should 'authenticate an active existing user through handle_active_user' do
+      @controller.expects(:handle_active_user).with(users(:users_001)).once.calls_original
       request.env['omniauth.auth'] = { 'saml_login' => 'admin' }
+
       get :login_with_saml_callback,
           params: { provider: 'saml' }
 
       assert_redirected_to '/my/page'
+      assert_equal users(:users_001).id, session[:user_id]
+      assert session[:logged_in_with_saml]
+      assert_equal users(:users_001), User.current
+    end
+
+    should 'update the Sudo Mode timestamp after successful SAML login' do
+      started_at = Time.now.to_i
+      request.env['omniauth.auth'] = { 'saml_login' => 'admin' }
+
+      get :login_with_saml_callback,
+          params: { provider: 'saml' }
+
+      assert_redirected_to '/my/page'
+      assert_operator session[:sudo_timestamp], :>=, started_at
+      assert_operator session[:sudo_timestamp], :<=, Time.now.to_i
     end
 
     should 'redirect to /login after failed login' do
@@ -103,8 +120,53 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
           params: { provider: 'saml' }
 
       assert_redirected_to '/my/page'
+      assert session[:logged_in_with_saml]
       assert_equal users(:users_001).mail, session['saml_uid']
       assert_equal '_saml-session-index', session['saml_session_index']
+    end
+
+    should 'reject a locked user without updating login state' do
+      user = users :users_005
+      last_login_on = user.last_login_on
+      request.env['omniauth.auth'] = { 'saml_login' => user.login }
+
+      get :login_with_saml_callback,
+          params: { provider: 'saml' }
+
+      assert_redirected_to '/login'
+      assert_equal l(:notice_account_locked), flash[:error]
+      assert_equal last_login_on, user.reload.last_login_on
+      assert_saml_session_deleted
+    end
+
+    should 'reject a registered user without updating login state' do
+      user = users :users_002
+      user.update_column :status, User::STATUS_REGISTERED
+      last_login_on = user.last_login_on
+      request.env['omniauth.auth'] = { 'saml_login' => user.login }
+
+      with_settings self_registration: '2' do
+        get :login_with_saml_callback,
+            params: { provider: 'saml' }
+      end
+
+      assert_redirected_to '/login'
+      assert_equal l(:notice_account_pending), flash[:error]
+      assert_equal last_login_on, user.reload.last_login_on
+      assert_saml_session_deleted
+    end
+
+    should 'render an error for an inactive user in replace mode without redirecting to login' do
+      change_saml_settings replace_redmine_login: 1
+      user = users :users_005
+      request.env['omniauth.auth'] = { 'saml_login' => user.login }
+
+      get :login_with_saml_callback,
+          params: { provider: 'saml' }
+
+      assert_response :forbidden
+      assert_select '#content', text: /#{Regexp.escape l(:notice_account_locked)}/
+      assert_saml_session_deleted
     end
 
     should 'redirect to Home if not logged in with SAML' do
