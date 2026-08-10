@@ -69,8 +69,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       assert_equal User.anonymous, User.current
     end
 
-    should 'authenticate an active existing user through handle_active_user' do
-      @controller.expects(:handle_active_user).with(users(:users_001)).once.calls_original
+    should 'authenticate an active existing user with the Redmine session lifecycle' do
       request.env['omniauth.auth'] = { 'saml_login' => 'admin' }
 
       get :login_with_saml_callback,
@@ -134,7 +133,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
           params: { provider: 'saml' }
 
       assert_redirected_to '/login'
-      assert_equal l(:notice_account_locked), flash[:error]
+      assert_equal I18n.t(:notice_account_locked), flash[:error]
       assert_equal last_login_on, user.reload.last_login_on
       assert_saml_session_deleted
     end
@@ -151,7 +150,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       end
 
       assert_redirected_to '/login'
-      assert_equal l(:notice_account_pending), flash[:error]
+      assert_equal I18n.t(:notice_account_pending), flash[:error]
       assert_equal last_login_on, user.reload.last_login_on
       assert_saml_session_deleted
     end
@@ -165,7 +164,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
           params: { provider: 'saml' }
 
       assert_response :forbidden
-      assert_select '#content', text: /#{Regexp.escape l(:notice_account_locked)}/
+      assert_select '#content', text: /#{Regexp.escape I18n.t(:notice_account_locked)}/
       assert_saml_session_deleted
     end
 
