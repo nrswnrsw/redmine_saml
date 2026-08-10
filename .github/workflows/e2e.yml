@@ -75,6 +75,12 @@ jobs:
           cp redmine/plugins/redmine_saml/test/support/configuration.yml \
              redmine/config/configuration.yml
 
+          cat > redmine/config/initializers/saml_e2e_forgery_protection.rb <<'RUBY'
+          Rails.application.config.after_initialize do
+            ActionController::Base.allow_forgery_protection = true
+          end
+          RUBY
+
       - name: Install Ruby dependencies
         working-directory: redmine
         run: |
@@ -230,6 +236,9 @@ jobs:
           RUBY
 
           bundle exec rails runner /tmp/create_e2e_user.rb
+
+          bundle exec rails runner \
+            "abort 'E2E forgery protection is disabled' unless ActionController::Base.allow_forgery_protection"
 
       - name: Start Redmine
         working-directory: redmine

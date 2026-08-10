@@ -96,7 +96,17 @@ test('log out of Redmine and Keycloak through real SAML SLO', async ({ page }) =
     page.locator('div.flyout-menu__avatar a.user.active')
   ).toHaveText('samltest');
 
+  const csrfParamMeta = page.locator('meta[name="csrf-param"]');
+  const csrfTokenMeta = page.locator('meta[name="csrf-token"]');
+  await expect(csrfParamMeta).toHaveAttribute('content', 'authenticity_token');
+  await expect(csrfTokenMeta).toHaveAttribute('content', /.+/);
+  const csrfParameterName = await csrfParamMeta.getAttribute('content');
+  const csrfToken = await csrfTokenMeta.getAttribute('content');
+
   const redmineLogoutRequestPromise = page.waitForRequest(isRedmineLogoutRequest);
+  const redmineLogoutHttpResponsePromise = page.waitForResponse(
+    response => isRedmineLogoutRequest(response.request())
+  );
   const keycloakLogoutRequestPromise = page.waitForRequest(
     request => isKeycloakSamlRequest(request, 'SAMLRequest')
   );
@@ -110,17 +120,28 @@ test('log out of Redmine and Keycloak through real SAML SLO', async ({ page }) =
   await page.locator('#account .dropdown-trigger').click();
   await page.getByRole('link', { name: 'Sign out', exact: true }).click();
 
-  const [redmineLogoutRequest, keycloakLogoutRequest, redmineLogoutResponse, redmineSlsResponse] = await Promise.all([
+  const [
+    redmineLogoutRequest,
+    redmineLogoutHttpResponse,
+    keycloakLogoutRequest,
+    redmineLogoutResponse,
+    redmineSlsResponse
+  ] = await Promise.all([
     redmineLogoutRequestPromise,
+    redmineLogoutHttpResponsePromise,
     keycloakLogoutRequestPromise,
     redmineLogoutResponsePromise,
     redmineSlsResponsePromise
   ]);
 
   expect(redmineLogoutRequest.method()).toBe('POST');
-  expect(
-    new URLSearchParams(redmineLogoutRequest.postData() || '').get('authenticity_token')
-  ).toBeTruthy();
+  const redmineLogoutParameters = new URLSearchParams(redmineLogoutRequest.postData() || '');
+  expect(redmineLogoutParameters.get('_method')).toBe('post');
+  expect(redmineLogoutParameters.get(csrfParameterName)).toBe(csrfToken);
+  expect(redmineLogoutHttpResponse.status()).toBe(302);
+  const redmineLogoutLocation = redmineLogoutHttpResponse.headers().location;
+  expect(redmineLogoutLocation).toContain(`${KEYCLOAK_ORIGIN}${KEYCLOAK_SAML_PATH}`);
+  expect(new URL(redmineLogoutLocation).searchParams.get('SAMLRequest')).toBeTruthy();
 
   expect(keycloakLogoutRequest.method()).toBe('GET');
   const logoutRequestXml = decodeRedirectMessage(

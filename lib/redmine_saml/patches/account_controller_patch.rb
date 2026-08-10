@@ -208,7 +208,9 @@ module RedmineSaml
 
         # Manage SLS response
         def redirect_after_saml_logout
-          return reject_saml_logout 'unsupported SAML logout HTTP method' unless saml_redirect_binding_request? || saml_post_binding_request?
+          unless saml_redirect_binding_request? || saml_post_binding_request?
+            return reject_saml_logout 'unsupported SAML logout HTTP method'
+          end
 
           if params[:SAMLRequest].present? && params[:SAMLResponse].blank?
             idp_logout_request
