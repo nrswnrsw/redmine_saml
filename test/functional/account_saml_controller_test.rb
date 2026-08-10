@@ -126,7 +126,6 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
 
     should 'reject a locked user without updating login state' do
       user = users :users_005
-      last_login_on = user.last_login_on
       request.env['omniauth.auth'] = { 'saml_login' => user.login }
 
       get :login_with_saml_callback,
@@ -134,7 +133,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
 
       assert_redirected_to '/login'
       assert_equal I18n.t(:notice_account_locked), flash[:error]
-      assert_equal last_login_on, user.reload.last_login_on
+      assert_nil user.reload.last_login_on
       assert_saml_session_deleted
     end
 
