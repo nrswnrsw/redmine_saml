@@ -9,7 +9,7 @@ Rails.application.routes.draw do
   match '/auth/:provider' => 'account#login_with_saml_redirect',
         as: :login_with_saml_redirect,
         via: %i[get post]
-  match '/auth/:provider/sls' => 'account#redirect_after_saml_logout',
+  match '/auth/saml/sls' => 'account#redirect_after_saml_logout',
         as: :redirect_after_saml_logout,
         via: %i[get post]
 end

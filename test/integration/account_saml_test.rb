@@ -110,4 +110,33 @@ class AccountSAMLTest < Redmine::IntegrationTest
       end
     end
   end
+
+  context 'unused OmniAuth SLO endpoints' do
+    setup do
+      Setting.default_language = 'en'
+      change_saml_settings saml_enabled: 1,
+                           onthefly_creation: 0
+      OmniAuth.config.test_mode = true
+      OmniAuth.config.mock_auth[:saml] = { 'saml_login' => 'admin' }
+
+      get RedmineSaml::CALLBACK_PATH
+      assert_redirected_to '/my/page'
+    end
+
+    should 'not expose the unverified OmniAuth SLO handler' do
+      post '/auth/saml/slo', params: { SAMLRequest: 'invalid' }
+
+      assert_response :not_found
+      assert_equal users(:users_001).id, session[:user_id]
+      assert session[:logged_in_with_saml]
+    end
+
+    should 'not allow a GET to start the OmniAuth SP logout handler' do
+      get '/auth/saml/spslo'
+
+      assert_response :not_found
+      assert_equal users(:users_001).id, session[:user_id]
+      assert session[:logged_in_with_saml]
+    end
+  end
 end

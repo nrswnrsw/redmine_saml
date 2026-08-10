@@ -125,6 +125,10 @@ jobs:
 
           metadata = urlopen(metadata_url).read()
           root = ET.fromstring(metadata)
+          idp_entity_id = root.attrib.get("entityID")
+
+          if not idp_entity_id:
+              raise SystemExit("ERROR: IdP entity ID not found in Keycloak metadata")
 
           ns = {
               "md": "urn:oasis:names:tc:SAML:2.0:metadata",
@@ -171,6 +175,8 @@ jobs:
 
               idp_sso_service_url: 'http://127.0.0.1:8080/realms/redmine-e2e/protocol/saml/clients/redmine',
               idp_slo_service_url: 'http://127.0.0.1:8080/realms/redmine-e2e/protocol/saml',
+              signout_url: 'http://127.0.0.1:8080/realms/redmine-e2e/protocol/saml',
+              idp_entity_id: {json.dumps(idp_entity_id)},
 
               idp_cert: {json.dumps(pem)},
 
@@ -259,7 +265,7 @@ jobs:
           npm install
           npx playwright install --with-deps chromium
 
-      - name: Run real SAML login test
+      - name: Run real SAML E2E tests
         working-directory: redmine/plugins/redmine_saml/test/e2e
         run: npx playwright test
 

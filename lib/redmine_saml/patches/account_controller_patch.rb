@@ -5,6 +5,9 @@ require_dependency 'account_controller'
 module RedmineSaml
   module Patches
     module AccountControllerPatch
+      SAML_REDIRECT_QUERY_PARAMETERS = %w[SAMLRequest SAMLResponse RelayState SigAlg Signature].freeze
+      SAML_REDIRECT_RAW_PARAMETERS = %w[SAMLRequest SAMLResponse RelayState SigAlg].freeze
+
       extend ActiveSupport::Concern
 
       included do
@@ -12,8 +15,10 @@ module RedmineSaml
 
         helper :omniauth_saml_account
 
-        before_action :require_saml_enabled, only: %i[login_with_saml_redirect login_with_saml_callback]
-        before_action :verify_authenticity_token, except: [:login_with_saml_callback]
+        before_action :require_saml_enabled,
+                      only: %i[login_with_saml_redirect login_with_saml_callback redirect_after_saml_logout]
+        before_action :verify_authenticity_token,
+                      except: %i[login_with_saml_callback redirect_after_saml_logout]
       end
 
       module InstanceOverwriteMethods
@@ -55,10 +60,14 @@ module RedmineSaml
           else
             user.update_column :last_login_on, Time.zone.now
             params[:back_url] = request.env['omniauth.origin'] if request.env['omniauth.origin'].present?
+            saml_uid = session['saml_uid']
+            saml_session_index = session['saml_session_index']
             successful_authentication user
 
             # cannot be set earlier, because sucessful_authentication() triggers reset_session()
             session[:logged_in_with_saml] = true
+            session['saml_uid'] = saml_uid if saml_uid.present?
+            session['saml_session_index'] = saml_session_index if saml_session_index.present?
           end
         end
 
@@ -75,39 +84,38 @@ module RedmineSaml
         end
 
         def logout
-          if RedmineSaml.enabled? && session[:logged_in_with_saml]
-            do_logout_with_saml
+          if RedmineSaml.enabled? && session[:logged_in_with_saml] && request.post?
+            sp_logout_request
           else
             super
           end
         end
 
-        def do_logout_with_saml
-          # If we're given a logout request, handle it in the IdP logout initiated method
-          if params[:SAMLRequest]
-            idp_logout_request
-          # We've been given a response back from the IdP, process it
-          elsif params[:SAMLResponse]
-            process_logout_response
-          # Initiate SLO (send Logout Request)
-          else
-            sp_logout_request
-          end
-        end
-
         # Method to handle IdP initiated logouts
         def idp_logout_request
-          settings = OneLogin::RubySaml::Settings.new omniauth_saml_settings
-          logout_request = OneLogin::RubySaml::SloLogoutrequest.new params[:SAMLRequest]
-          unless logout_request.is_valid?
-            msg = 'IdP initiated LogoutRequest was not valid!'
-            logger.error msg
-            return render_error message: msg, status: 500
-          end
-          logger.info "IdP initiated Logout for #{logout_request.name_id}"
+          return reject_saml_logout('no active SAML session') unless active_saml_logout_session?
+          return reject_saml_logout('missing SAML signature') unless valid_saml_signature_parameters?
 
-          # Actually log out this session
-          saml_logout_user
+          settings = OneLogin::RubySaml::Settings.new omniauth_saml_settings
+          return reject_saml_logout('SAML message is too large') unless valid_saml_message_size?(params[:SAMLRequest], settings)
+
+          options = { settings: settings }
+          if request.get?
+            query_options = saml_redirect_query_options
+            return reject_saml_logout('duplicate SAML query parameter') if query_options.blank?
+
+            options.merge! query_options
+          end
+          logout_request = OneLogin::RubySaml::SloLogoutrequest.new params[:SAMLRequest], options
+
+          valid = logout_request.is_valid? &&
+                  valid_post_saml_signature?(logout_request.document, settings) &&
+                  valid_saml_message_context?(logout_request, settings) &&
+                  valid_saml_name_id?(logout_request.name_id) &&
+                  valid_saml_session_index?(logout_request.session_indexes)
+          return reject_saml_logout('invalid LogoutRequest') unless valid
+
+          logger.info "IdP initiated Logout for #{logout_request.name_id}"
 
           # Generate a response to the IdP.
           logout_request_id = logout_request.id
@@ -116,69 +124,255 @@ module RedmineSaml
                                                                              nil,
                                                                              RelayState: params[:RelayState]
 
+          # Actually log out this session only after validation and response generation succeed.
           redirect_to logout_response
+          saml_logout_user
+        rescue StandardError => e
+          reject_saml_logout "LogoutRequest validation raised #{e.class}"
         end
 
-        # After sending an SP initiated LogoutRequest to the IdP, we need to accept
-        # the LogoutResponse, verify it, then actually delete our session.
+        # After sending an SP initiated LogoutRequest to the IdP, accept and verify
+        # the LogoutResponse, then finish the already-local logout transaction.
         def process_logout_response
+          return reject_saml_logout('no active or pending SAML logout') unless valid_saml_logout_response_session?
+          return reject_saml_logout('missing SAML transaction ID') if session[:transaction_id].blank?
+          return reject_saml_logout('missing SAML signature') unless valid_saml_signature_parameters?
+
           settings = OneLogin::RubySaml::Settings.new omniauth_saml_settings
+          return reject_saml_logout('SAML message is too large') unless valid_saml_message_size?(params[:SAMLResponse], settings)
+
+          options = { matches_request_id: session[:transaction_id] }
+          if request.get?
+            query_options = saml_redirect_query_options
+            return reject_saml_logout('duplicate SAML query parameter') if query_options.blank?
+
+            options.merge! query_options
+          end
 
           logout_response = OneLogin::RubySaml::Logoutresponse.new(
             params[:SAMLResponse],
             settings,
-            session.key?(:transaction_id) ? { matches_request_id: session[:transaction_id] } : {}
+            options
           )
 
           logger.info "LogoutResponse is: #{logout_response}"
 
           # Validate the SAML Logout Response
-          if logout_response.validate
-            # Actually log out this session
-            if logout_response.success?
-              logger.info "Delete session for '#{User.current.login}'"
-              saml_logout_user
-            end
-          else
-            logger.error 'The SAML Logout Response is invalid'
-          end
+          valid = logout_response.validate &&
+                  valid_post_saml_signature?(logout_response.document, settings) &&
+                  valid_saml_message_context?(logout_response, settings)
+          return reject_saml_logout('invalid LogoutResponse') unless valid
 
+          if active_saml_logout_session?
+            logger.info "Delete session for '#{User.current.login}'"
+            saml_logout_user
+          else
+            clear_pending_saml_logout
+          end
           redirect_to home_path
+        rescue StandardError => e
+          reject_saml_logout "LogoutResponse validation raised #{e.class}"
         end
 
         # Create a SP initiated SLO
         def sp_logout_request
           # LogoutRequest accepts plain browser requests w/o parameters
-          settings = omniauth_saml_settings
+          settings = omniauth_saml_settings.dup
 
           if settings[:signout_url]
             # Since we created a new SAML request, save the transaction_id
             # to compare it with the response we get back
             logout_request = OneLogin::RubySaml::Logoutrequest.new
-            session[:transaction_id] = logout_request.uuid
-            logger.info "New SP SLO for userid '#{User.current.login}' transactionid '#{session[:transaction_id]}'"
+            transaction_id = logout_request.uuid
+            logger.info "New SP SLO for userid '#{User.current.login}' transactionid '#{transaction_id}'"
 
-            settings[:name_identifier_value] ||= name_identifier_value
+            settings[:name_identifier_value] = session['saml_uid'].presence || name_identifier_value
+            settings[:sessionindex] = session['saml_session_index'] if session['saml_session_index'].present?
 
-            redirect_to logout_request.create(OneLogin::RubySaml::Settings.new(settings),
-                                              RelayState: home_url)
+            logout_url = logout_request.create(OneLogin::RubySaml::Settings.new(settings),
+                                               RelayState: home_url)
+            saml_logout_user
+            session[:transaction_id] = transaction_id
+            session[:saml_logout_pending] = true
+            redirect_to logout_url
           else
             logger.info 'SLO IdP Endpoint not found in settings, executing then a normal logout'
             saml_logout_user
             redirect_to home_path
           end
+        rescue StandardError => e
+          logger.warn "SP initiated SAML logout failed: #{e.class}"
+          saml_logout_user
+          redirect_to home_path
         end
 
         # Manage SLS response
         def redirect_after_saml_logout
-          saml_logout_user
-          redirect_to signin_url
+          if params[:SAMLRequest].present? && params[:SAMLResponse].blank?
+            idp_logout_request
+          elsif params[:SAMLResponse].present? && params[:SAMLRequest].blank?
+            process_logout_response
+          else
+            reject_saml_logout 'exactly one SAML logout message is required'
+          end
         end
 
         private
 
         def require_saml_enabled
           redirect_to signin_url unless RedmineSaml.enabled?
+        end
+
+        def active_saml_logout_session?
+          RedmineSaml.enabled? && session[:logged_in_with_saml] && User.current.logged?
+        end
+
+        def valid_saml_logout_response_session?
+          active_saml_logout_session? || (session[:saml_logout_pending] && User.current.anonymous?)
+        end
+
+        def valid_saml_signature_parameters?
+          return params[:Signature].present? && params[:SigAlg].present? if request.get?
+
+          request.post?
+        end
+
+        def saml_query_parameters
+          request.query_parameters.to_h.dup
+        end
+
+        def saml_redirect_query_options
+          raw_parameters = {}
+          parameter_counts = Hash.new 0
+
+          request.query_string.to_s.split('&').each do |query_component|
+            encoded_name, encoded_value = query_component.split('=', 2)
+            name = Rack::Utils.unescape encoded_name.to_s
+            next unless SAML_REDIRECT_QUERY_PARAMETERS.include? name
+
+            parameter_counts[name] += 1
+            raw_parameters[name] = encoded_value.to_s
+          end
+
+          return if parameter_counts.any? { |_name, count| count > 1 }
+
+          {
+            get_params: {
+              'Signature' => saml_query_parameters['Signature']
+            },
+            raw_get_params: raw_parameters.slice(*SAML_REDIRECT_RAW_PARAMETERS)
+          }
+        end
+
+        def valid_saml_message_size?(message, settings)
+          message.to_s.bytesize <= settings.message_max_bytesize
+        end
+
+        def valid_saml_message_context?(message, settings)
+          expected_issuer = settings.idp_entity_id.to_s
+          issuer = message.issuer.to_s
+          expected_destination = settings.single_logout_service_url.to_s
+          destination = message.document.root&.attributes&.[]('Destination').to_s
+
+          issuer.present? &&
+            (expected_issuer.blank? || issuer == expected_issuer) &&
+            expected_destination.present? &&
+            destination == expected_destination
+        end
+
+        def valid_saml_name_id?(name_id)
+          expected_name_id = session['saml_uid'].presence || name_identifier_value.to_s
+          return false if name_id.blank? || expected_name_id.blank?
+
+          ActiveSupport::SecurityUtils.secure_compare name_id.to_s, expected_name_id
+        end
+
+        def valid_saml_session_index?(requested_session_indexes)
+          return true if requested_session_indexes.empty?
+
+          session['saml_session_index'].present? && requested_session_indexes.include?(session['saml_session_index'])
+        end
+
+        def valid_post_saml_signature?(document, settings)
+          return true if request.get?
+          return false unless request.post?
+
+          signed_document = XMLSecurity::SignedDocument.new document.to_s
+          root_id = signed_document.root&.attributes&.[]('ID').to_s
+          signed_element_id = signed_document.signed_element_id.to_s
+          return false if root_id.blank? || root_id != signed_element_id
+
+          namespaces = { 'ds' => XMLSecurity::BaseDocument::DSIG }
+          signatures = REXML::XPath.match signed_document, '//ds:Signature', namespaces
+          root_signatures = REXML::XPath.match signed_document.root, './ds:Signature', namespaces
+          elements_with_signed_id = REXML::XPath.match signed_document,
+                                                        '//*[@ID=$id]',
+                                                        {},
+                                                        { 'id' => signed_element_id }
+          return false unless signatures.one? && root_signatures.one? && elements_with_signed_id.one?
+
+          valid_post_saml_certificate_signature? signed_document, settings
+        end
+
+        def valid_post_saml_certificate_signature?(signed_document, settings)
+          idp_certs = settings.get_idp_cert_multi
+          signing_certs = idp_certs && idp_certs[:signing]
+
+          if signing_certs.present?
+            signing_certs.any? do |certificate|
+              signed_document.validate_document_with_cert(certificate, true) && valid_idp_certificate?(certificate, settings)
+            end
+          else
+            certificate = settings.get_idp_cert
+            if certificate.present?
+              return signed_document.validate_document_with_cert(certificate, true) &&
+                     valid_idp_certificate?(certificate, settings)
+            end
+
+            fingerprint = settings.get_fingerprint
+            return false if fingerprint.blank?
+
+            certificate = saml_signature_certificate signed_document
+            return false if certificate.blank?
+
+            options = { fingerprint_alg: settings.idp_cert_fingerprint_algorithm }
+            signed_document.validate_document(fingerprint, true, options) &&
+              valid_idp_certificate?(certificate, settings)
+          end
+        end
+
+        def saml_signature_certificate(signed_document)
+          namespaces = { 'ds' => XMLSecurity::BaseDocument::DSIG }
+          certificates = REXML::XPath.match(signed_document, '//ds:X509Certificate', namespaces)
+          signature_certificates = REXML::XPath.match(
+            signed_document.root,
+            './ds:Signature/ds:KeyInfo/ds:X509Data/ds:X509Certificate',
+            namespaces
+          )
+          return unless certificates.one? && signature_certificates.one? && certificates.first.equal?(signature_certificates.first)
+
+          certificate_data = OneLogin::RubySaml::Utils.element_text signature_certificates.first
+          return if certificate_data.blank?
+
+          OpenSSL::X509::Certificate.new Base64.decode64(certificate_data)
+        rescue ArgumentError, OpenSSL::X509::CertificateError
+          nil
+        end
+
+        def valid_idp_certificate?(certificate, settings)
+          return true unless settings.security[:check_idp_cert_expiration]
+
+          certificate.present? && !OneLogin::RubySaml::Utils.is_cert_expired(certificate)
+        end
+
+        def reject_saml_logout(reason)
+          logger.warn "SAML logout rejected: #{reason}"
+          render_error message: 'Invalid SAML logout request or response', status: 400
+        end
+
+        def clear_pending_saml_logout
+          session.delete :transaction_id
+          session.delete :saml_logout_pending
         end
 
         def saml_logout_user

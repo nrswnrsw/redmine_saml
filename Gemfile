@@ -3,6 +3,7 @@
 gem 'omniauth-rails_csrf_protection'
 gem 'omniauth-saml', '>= 2.2.4'
 gem 'redmine_plugin_kit'
+gem 'ruby-saml', '>= 1.18.1'
 gem 'slim-rails'
 
 group :test do

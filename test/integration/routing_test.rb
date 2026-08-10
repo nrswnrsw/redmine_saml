@@ -13,6 +13,11 @@ class RoutingTest < Redmine::RoutingTest
 
   test 'routing saml' do
     should_route 'GET /auth/failure' => 'account#login_with_saml_failure'
-    should_route 'GET /auth/blah/sls' => 'account#redirect_after_saml_logout', provider: 'blah'
+    should_route 'GET /auth/saml/sls' => 'account#redirect_after_saml_logout'
+    should_route 'POST /auth/saml/sls' => 'account#redirect_after_saml_logout'
+
+    assert_raises ActionController::RoutingError do
+      Rails.application.routes.recognize_path '/auth/blah/sls', method: :get
+    end
   end
 end

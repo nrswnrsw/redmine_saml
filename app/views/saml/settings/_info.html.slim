@@ -54,11 +54,11 @@ br
       = saml_url_validate_test RedmineSaml.configured_saml[:assertion_consumer_service_url],
                                login_with_saml_callback_url(provider: 'saml')
     li
-      = link_to redirect_after_saml_logout_path(provider: 'saml'),
-                redirect_after_saml_logout_url(provider: 'saml')
+      = link_to redirect_after_saml_logout_path,
+                redirect_after_saml_logout_url
       ' :
       = link_to RedmineSaml.configured_saml[:single_logout_service_url],
                 RedmineSaml.configured_saml[:single_logout_service_url]
       '
       = saml_url_validate_test RedmineSaml.configured_saml[:single_logout_service_url],
-                               redirect_after_saml_logout_url(provider: 'saml')
+                               redirect_after_saml_logout_url

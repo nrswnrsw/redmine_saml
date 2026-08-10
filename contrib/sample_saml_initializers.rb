@@ -14,6 +14,8 @@ RedmineSaml::Base.configure do |config|
     single_logout_service_url: "http://redmine.example.com#{RedmineSaml::LOGOUT_SERVICE_PATH}",
     # SSO login endpoint
     idp_sso_service_url: 'https://sso.desarrollo.unlp.edu.ar/saml2/idp/SSOService.php',
+    # Optional IdP entity ID. When set, SAML logout message issuers must match it.
+    idp_entity_id: 'https://sso.desarrollo.unlp.edu.ar/saml2/idp/metadata.php',
     # SSO SSL certificate SHA-1 fingerprint
     # NOTE: only use idp_cert OR idp_cert_fingerprint (not both!)
     idp_cert_fingerprint: 'certificate fingerprint',
