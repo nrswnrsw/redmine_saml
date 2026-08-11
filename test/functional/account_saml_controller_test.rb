@@ -226,6 +226,8 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       establish_saml_session
       Rails.logger.expects(:error).with('IdP initiated LogoutRequest was not valid!').never
       Rails.logger.expects(:error).with('The SAML Logout Response is invalid').never
+      expected_login = User.current.login
+      info_logs = capture_info_logs
       session['saml_uid'] = '_opaque-idp-name-id'
       expected_name_id = session['saml_uid']
       expected_session_index = session['saml_session_index']
@@ -237,6 +239,8 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
                    @response.redirect_url)
       assert session[:transaction_id].present?
       assert session[:saml_logout_pending]
+      assert_equal expected_login, session[:saml_logout_login]
+      assert_not_includes info_logs, "Delete session for '#{expected_login}'"
       request_params = Rack::Utils.parse_query URI.parse(@response.redirect_url).query
       logout_request = OneLogin::RubySaml::SloLogoutrequest.new request_params['SAMLRequest']
       assert_equal expected_name_id, logout_request.name_id
@@ -251,11 +255,29 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       establish_saml_session
       Rails.logger.expects(:error).with('IdP initiated LogoutRequest was not valid!').never
       Rails.logger.expects(:error).with('The SAML Logout Response is invalid').never
+      expected_login = User.current.login
+      info_logs = capture_info_logs
 
       post :logout
 
       assert_redirected_to home_path
       assert_saml_session_deleted
+      assert_nil session[:saml_logout_login]
+      assert_not_includes info_logs, "Delete session for '#{expected_login}'"
+    end
+
+    should 'locally log out without a compatibility marker when the SLO endpoint is unavailable' do
+      RedmineSaml.configured_saml.delete :signout_url
+      establish_saml_session
+      expected_login = User.current.login
+      info_logs = capture_info_logs
+
+      post :logout
+
+      assert_redirected_to home_path
+      assert_saml_session_deleted
+      assert_nil session[:saml_logout_login]
+      assert_not_includes info_logs, "Delete session for '#{expected_login}'"
     end
 
     should 'keep legacy full-certificate login and local logout without idp_entity_id' do
@@ -293,16 +315,25 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       configure_fingerprint_only_slo
       RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
       establish_saml_session
+      expected_login = User.current.login
+      info_logs = capture_info_logs
+      Rails.logger.expects(:warn).with('SAML logout rejected: invalid LogoutResponse').once
+      Rails.logger.expects(:error).with('The SAML Logout Response is invalid').once
 
       post :logout
       transaction_id = session[:transaction_id]
       assert_saml_session_deleted
+      assert_equal expected_login, session[:saml_logout_login]
 
       get :redirect_after_saml_logout,
           params: signed_logout_response_params(request_id: transaction_id)
 
       assert_response :bad_request
       assert_saml_session_deleted
+      assert_equal transaction_id, session[:transaction_id]
+      assert session[:saml_logout_pending]
+      assert_equal expected_login, session[:saml_logout_login]
+      assert_not_includes info_logs, "Delete session for '#{expected_login}'"
     end
   end
 
@@ -434,6 +465,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       logout_params = signed_logout_request_params
       logout_request = OneLogin::RubySaml::SloLogoutrequest.new logout_params['SAMLRequest']
       Rails.logger.expects(:error).with('IdP initiated LogoutRequest was not valid!').never
+      info_logs = capture_info_logs
 
       get :redirect_after_saml_logout, params: logout_params
 
@@ -442,6 +474,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       logout_response = OneLogin::RubySaml::Logoutresponse.new response_params['SAMLResponse']
       assert_equal logout_request.id, logout_response.in_response_to
       assert_saml_session_deleted
+      assert_empty info_logs.grep(/\ADelete session for /)
     end
 
     should 'accept a Redirect LogoutRequest signed with the IdP raw percent encoding' do
@@ -489,6 +522,10 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
 
     should 'process a valid SP initiated LogoutResponse and delete the session' do
       session[:transaction_id] = '_expected-request-id'
+      session[:saml_logout_pending] = true
+      session[:saml_logout_login] = 'pending-login-must-not-be-logged'
+      expected_login = User.current.login
+      info_logs = capture_info_logs
       logout_params = signed_logout_response_params request_id: session[:transaction_id]
       Rails.logger.expects(:error).with('The SAML Logout Response is invalid').never
 
@@ -496,6 +533,10 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
 
       assert_redirected_to home_path
       assert_saml_session_deleted
+      assert_equal ["Delete session for '#{expected_login}'"], info_logs.grep(/\ADelete session for /)
+      assert_nil session[:transaction_id]
+      assert_not session[:saml_logout_pending]
+      assert_nil session[:saml_logout_login]
     end
 
     should 'accept a Redirect LogoutResponse signed with the IdP raw percent encoding' do
@@ -555,18 +596,33 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
 
     should 'validate a pending SP LogoutResponse after the local session was already deleted' do
       RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      expected_login = User.current.login
+      delete_session_log = "Delete session for '#{expected_login}'"
+      info_logs = capture_info_logs
 
       post :logout
       transaction_id = session[:transaction_id]
       assert session[:saml_logout_pending]
+      assert_equal expected_login, session[:saml_logout_login]
       assert_saml_session_deleted
+      assert_not_includes info_logs, delete_session_log
+
+      logout_params = signed_logout_response_params request_id: transaction_id
 
       get :redirect_after_saml_logout,
-          params: signed_logout_response_params(request_id: transaction_id)
+          params: logout_params
 
       assert_redirected_to home_path
+      assert_equal [delete_session_log], info_logs.grep(/\ADelete session for /)
       assert_nil session[:transaction_id]
       assert_not session[:saml_logout_pending]
+      assert_nil session[:saml_logout_login]
+      assert_saml_session_deleted
+
+      get :redirect_after_saml_logout, params: logout_params
+
+      assert_response :bad_request
+      assert_equal [delete_session_log], info_logs.grep(/\ADelete session for /)
       assert_saml_session_deleted
     end
 
@@ -749,6 +805,15 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
   end
 
   private
+
+  def capture_info_logs
+    messages = []
+    Rails.logger.stubs(:info).with do |message|
+      messages << message
+      true
+    end
+    messages
+  end
 
   def configure_slo_test
     config = RedmineSaml.configured_saml

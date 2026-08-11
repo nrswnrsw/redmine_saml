@@ -175,8 +175,10 @@ module RedmineSaml
           return reject_logout_response 'invalid LogoutResponse' unless valid
 
           validation_complete = true
-          if active_saml_logout_session?
-            logger.info "Delete session for '#{User.current.login}'"
+          active_session = active_saml_logout_session?
+          logout_login = active_session ? User.current.login : session[:saml_logout_login]
+          logger.info "Delete session for '#{logout_login}'" if logout_login.present?
+          if active_session
             saml_logout_user
           else
             clear_pending_saml_logout
@@ -201,7 +203,8 @@ module RedmineSaml
             # to compare it with the response we get back
             logout_request = OneLogin::RubySaml::Logoutrequest.new
             transaction_id = logout_request.uuid
-            logger.info "New SP SLO for userid '#{User.current.login}' transactionid '#{transaction_id}'"
+            logout_login = User.current.login
+            logger.info "New SP SLO for userid '#{logout_login}' transactionid '#{transaction_id}'"
 
             settings[:name_identifier_value] = session['saml_uid'].presence || name_identifier_value
             settings[:sessionindex] = session['saml_session_index'] if session['saml_session_index'].present?
@@ -211,6 +214,7 @@ module RedmineSaml
             saml_logout_user
             session[:transaction_id] = transaction_id
             session[:saml_logout_pending] = true
+            session[:saml_logout_login] = logout_login
             redirect_to logout_url
           else
             logger.info 'SLO IdP Endpoint not found in settings, executing then a normal logout'
@@ -422,6 +426,7 @@ module RedmineSaml
         def clear_pending_saml_logout
           session.delete :transaction_id
           session.delete :saml_logout_pending
+          session.delete :saml_logout_login
         end
 
         def saml_logout_user
