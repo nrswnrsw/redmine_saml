@@ -488,7 +488,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
 
     should 'use a queryless IdP SLO response URL when the service URL is also queryless' do
       assert_idp_logout_response_url service_url: 'https://idp-slo.example.test/saml/logout',
-                                      response_url: 'https://idp-response.example.test/saml/logout'
+                                     response_url: 'https://idp-response.example.test/saml/logout'
     end
 
     should 'use a queryless IdP SLO response URL when the service URL has a query' do
@@ -497,19 +497,19 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       info_logs = capture_info_logs
 
       assert_idp_logout_response_url service_url: 'https://idp-slo.example.test/saml/logout?service=original',
-                                      response_url: 'https://idp-response.example.test/saml/logout'
+                                     response_url: 'https://idp-response.example.test/saml/logout'
 
       assert_empty info_logs.grep(/\ADelete session for /)
     end
 
     should 'use an IdP SLO response URL with a query when the service URL is queryless' do
       assert_idp_logout_response_url service_url: 'https://idp-slo.example.test/saml/logout',
-                                      response_url: 'https://idp-response.example.test/saml/logout?response=original'
+                                     response_url: 'https://idp-response.example.test/saml/logout?response=original'
     end
 
     should 'use an IdP SLO response URL with a query when the service URL also has a query' do
       assert_idp_logout_response_url service_url: 'https://idp-slo.example.test/saml/logout?service=original',
-                                      response_url: 'https://idp-response.example.test/saml/logout?response=original'
+                                     response_url: 'https://idp-response.example.test/saml/logout?response=original'
     end
 
     should 'sign a LogoutResponse after correcting the response endpoint query separator' do
@@ -918,7 +918,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
   end
 
   def assert_idp_logout_response_url(service_url:, response_url: nil,
-                                      relay_state: 'https://attacker.example/after-logout?next=/admin')
+                                     relay_state: 'https://attacker.example/after-logout?next=/admin')
     config = RedmineSaml.configured_saml
     config[:idp_slo_service_url] = service_url
     if response_url
