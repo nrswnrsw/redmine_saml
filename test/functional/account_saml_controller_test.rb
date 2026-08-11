@@ -224,6 +224,8 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
       RedmineSaml.configured_saml[:idp_slo_service_url] = 'https://saml.server/ls/?wa=wsignout1'
       establish_saml_session
+      Rails.logger.expects(:error).with('IdP initiated LogoutRequest was not valid!').never
+      Rails.logger.expects(:error).with('The SAML Logout Response is invalid').never
       session['saml_uid'] = '_opaque-idp-name-id'
       expected_name_id = session['saml_uid']
       expected_session_index = session['saml_session_index']
@@ -247,6 +249,8 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
       RedmineSaml.configured_saml[:idp_slo_service_url] = nil
       establish_saml_session
+      Rails.logger.expects(:error).with('IdP initiated LogoutRequest was not valid!').never
+      Rails.logger.expects(:error).with('The SAML Logout Response is invalid').never
 
       post :logout
 
@@ -315,6 +319,9 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     end
 
     should 'keep the session when HEAD carries a LogoutRequest' do
+      Rails.logger.expects(:error).with('IdP initiated LogoutRequest was not valid!').never
+      Rails.logger.expects(:error).with('The SAML Logout Response is invalid').never
+
       head :redirect_after_saml_logout, params: signed_logout_request_params
 
       assert_response :bad_request
@@ -337,6 +344,9 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       logout_params = signed_logout_request_params
       logout_params.delete 'Signature'
       logout_params.delete 'SigAlg'
+      Rails.logger.expects(:warn).with('SAML logout rejected: missing SAML signature').once
+      Rails.logger.expects(:error).with('IdP initiated LogoutRequest was not valid!').once
+      Rails.logger.expects(:error).with('The SAML Logout Response is invalid').never
 
       get :redirect_after_saml_logout, params: logout_params
 
@@ -423,6 +433,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     should 'process a valid IdP initiated LogoutRequest with a matching configured issuer' do
       logout_params = signed_logout_request_params
       logout_request = OneLogin::RubySaml::SloLogoutrequest.new logout_params['SAMLRequest']
+      Rails.logger.expects(:error).with('IdP initiated LogoutRequest was not valid!').never
 
       get :redirect_after_saml_logout, params: logout_params
 
@@ -457,6 +468,9 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       session[:transaction_id] = '_expected-request-id'
       logout_params = signed_logout_response_params request_id: session[:transaction_id]
       logout_params['Signature'] = Base64.strict_encode64 'invalid signature'
+      Rails.logger.expects(:warn).with('SAML logout rejected: invalid LogoutResponse').once
+      Rails.logger.expects(:error).with('The SAML Logout Response is invalid').once
+      Rails.logger.expects(:error).with('IdP initiated LogoutRequest was not valid!').never
 
       get :redirect_after_saml_logout, params: logout_params
 
@@ -476,6 +490,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     should 'process a valid SP initiated LogoutResponse and delete the session' do
       session[:transaction_id] = '_expected-request-id'
       logout_params = signed_logout_response_params request_id: session[:transaction_id]
+      Rails.logger.expects(:error).with('The SAML Logout Response is invalid').never
 
       get :redirect_after_saml_logout, params: logout_params
 

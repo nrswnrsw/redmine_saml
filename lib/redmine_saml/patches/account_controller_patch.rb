@@ -96,16 +96,17 @@ module RedmineSaml
 
         # Method to handle IdP initiated logouts
         def idp_logout_request
+          validation_complete = false
           return reject_saml_logout 'no active SAML session' unless active_saml_logout_session?
-          return reject_saml_logout 'missing SAML signature' unless valid_saml_signature_parameters?
+          return reject_idp_logout_request 'missing SAML signature' unless valid_saml_signature_parameters?
 
           settings = OneLogin::RubySaml::Settings.new omniauth_saml_settings
-          return reject_saml_logout 'SAML message is too large' unless valid_saml_message_size? params[:SAMLRequest], settings
+          return reject_idp_logout_request 'SAML message is too large' unless valid_saml_message_size? params[:SAMLRequest], settings
 
           options = { settings: settings }
           if saml_redirect_binding_request?
             query_options = saml_redirect_query_options
-            return reject_saml_logout 'duplicate SAML query parameter' if query_options.blank?
+            return reject_idp_logout_request 'duplicate SAML query parameter' if query_options.blank?
 
             options.merge! query_options
           end
@@ -116,8 +117,9 @@ module RedmineSaml
                   valid_saml_message_context?(logout_request, settings) &&
                   valid_saml_name_id?(logout_request.name_id) &&
                   valid_saml_session_index?(logout_request.session_indexes)
-          return reject_saml_logout 'invalid LogoutRequest' unless valid
+          return reject_idp_logout_request 'invalid LogoutRequest' unless valid
 
+          validation_complete = true
           logger.info "IdP initiated Logout for #{logout_request.name_id}"
 
           # Generate a response to the IdP.
@@ -131,23 +133,29 @@ module RedmineSaml
           redirect_to logout_response
           saml_logout_user
         rescue StandardError => e
-          reject_saml_logout "LogoutRequest validation raised #{e.class}"
+          reason = "LogoutRequest validation raised #{e.class}"
+          if validation_complete
+            reject_saml_logout reason
+          else
+            reject_idp_logout_request reason
+          end
         end
 
         # After sending an SP initiated LogoutRequest to the IdP, accept and verify
         # the LogoutResponse, then finish the already-local logout transaction.
         def process_logout_response
+          validation_complete = false
           return reject_saml_logout 'no active or pending SAML logout' unless valid_saml_logout_response_session?
-          return reject_saml_logout 'missing SAML transaction ID' if session[:transaction_id].blank?
-          return reject_saml_logout 'missing SAML signature' unless valid_saml_signature_parameters?
+          return reject_logout_response 'missing SAML transaction ID' if session[:transaction_id].blank?
+          return reject_logout_response 'missing SAML signature' unless valid_saml_signature_parameters?
 
           settings = OneLogin::RubySaml::Settings.new omniauth_saml_settings
-          return reject_saml_logout 'SAML message is too large' unless valid_saml_message_size? params[:SAMLResponse], settings
+          return reject_logout_response 'SAML message is too large' unless valid_saml_message_size? params[:SAMLResponse], settings
 
           options = { matches_request_id: session[:transaction_id] }
           if saml_redirect_binding_request?
             query_options = saml_redirect_query_options
-            return reject_saml_logout 'duplicate SAML query parameter' if query_options.blank?
+            return reject_logout_response 'duplicate SAML query parameter' if query_options.blank?
 
             options.merge! query_options
           end
@@ -164,8 +172,9 @@ module RedmineSaml
           valid = logout_response.validate &&
                   valid_post_saml_signature?(logout_response.document, settings) &&
                   valid_saml_message_context?(logout_response, settings)
-          return reject_saml_logout 'invalid LogoutResponse' unless valid
+          return reject_logout_response 'invalid LogoutResponse' unless valid
 
+          validation_complete = true
           if active_saml_logout_session?
             logger.info "Delete session for '#{User.current.login}'"
             saml_logout_user
@@ -174,7 +183,12 @@ module RedmineSaml
           end
           redirect_to home_path
         rescue StandardError => e
-          reject_saml_logout "LogoutResponse validation raised #{e.class}"
+          reason = "LogoutResponse validation raised #{e.class}"
+          if validation_complete
+            reject_saml_logout reason
+          else
+            reject_logout_response reason
+          end
         end
 
         # Create a SP initiated SLO
@@ -391,8 +405,17 @@ module RedmineSaml
           certificate.present? && !OneLogin::RubySaml::Utils.is_cert_expired(certificate)
         end
 
-        def reject_saml_logout(reason)
+        def reject_idp_logout_request(reason)
+          reject_saml_logout reason, compatibility_error: 'IdP initiated LogoutRequest was not valid!'
+        end
+
+        def reject_logout_response(reason)
+          reject_saml_logout reason, compatibility_error: 'The SAML Logout Response is invalid'
+        end
+
+        def reject_saml_logout(reason, compatibility_error: nil)
           logger.warn "SAML logout rejected: #{reason}"
+          logger.error compatibility_error if compatibility_error
           render_error message: 'Invalid SAML logout request or response', status: 400
         end
 
