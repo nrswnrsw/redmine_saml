@@ -215,7 +215,7 @@ module RedmineSaml
             session[:transaction_id] = transaction_id
             session[:saml_logout_pending] = true
             session[:saml_logout_login] = logout_login
-            redirect_to logout_url
+            redirect_to logout_url, allow_other_host: true
           else
             logger.info 'SLO IdP Endpoint not found in settings, executing then a normal logout'
             saml_logout_user
