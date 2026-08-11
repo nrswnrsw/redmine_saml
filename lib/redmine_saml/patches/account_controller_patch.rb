@@ -124,7 +124,8 @@ module RedmineSaml
 
           # Generate a response to the IdP.
           logout_request_id = logout_request.id
-          logout_response = OneLogin::RubySaml::SloLogoutresponse.new.create settings,
+          logout_response_settings = saml_logout_response_settings settings
+          logout_response = OneLogin::RubySaml::SloLogoutresponse.new.create logout_response_settings,
                                                                              logout_request_id,
                                                                              nil,
                                                                              RelayState: params[:RelayState]
@@ -440,6 +441,13 @@ module RedmineSaml
 
         def omniauth_saml_settings
           RedmineSaml.configured_saml
+        end
+
+        def saml_logout_response_settings(settings)
+          settings.dup.tap do |logout_response_settings|
+            response_url = settings.idp_slo_response_service_url
+            logout_response_settings.idp_slo_service_url = response_url if response_url.present?
+          end
         end
 
         def saml_logout_url(service = nil)

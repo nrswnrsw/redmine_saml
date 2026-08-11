@@ -476,48 +476,98 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       assert_saml_session_active
     end
 
-    should 'process a valid IdP initiated LogoutRequest with a matching configured issuer' do
-      response_service_url = 'https://idp-response.example.test/saml/logout'
-      relay_state = 'https://attacker.example/after-logout?next=/admin'
-      RedmineSaml.configured_saml[:idp_slo_response_service_url] = response_service_url
-      logout_params = signed_logout_request_params relay_state: relay_state
-      logout_request = OneLogin::RubySaml::SloLogoutrequest.new logout_params['SAMLRequest']
+    should 'use an IdP SLO service URL without a query for a LogoutResponse' do
+      Rails.logger.expects(:warn).with(regexp_matches(/\AOpen redirect to /)).never
+
+      assert_idp_logout_response_url service_url: 'https://idp-slo.example.test/saml/logout'
+    end
+
+    should 'use an IdP SLO service URL with a query for a LogoutResponse' do
+      assert_idp_logout_response_url service_url: 'https://idp-slo.example.test/saml/logout?service=original'
+    end
+
+    should 'use a queryless IdP SLO response URL when the service URL is also queryless' do
+      assert_idp_logout_response_url service_url: 'https://idp-slo.example.test/saml/logout',
+                                      response_url: 'https://idp-response.example.test/saml/logout'
+    end
+
+    should 'use a queryless IdP SLO response URL when the service URL has a query' do
       Rails.logger.expects(:error).with('IdP initiated LogoutRequest was not valid!').never
       Rails.logger.expects(:warn).with(regexp_matches(/\AOpen redirect to /)).never
       info_logs = capture_info_logs
 
-      get :redirect_after_saml_logout, params: logout_params
+      assert_idp_logout_response_url service_url: 'https://idp-slo.example.test/saml/logout?service=original',
+                                      response_url: 'https://idp-response.example.test/saml/logout'
 
-      assert_response :redirect
-      response_uri = URI.parse @response.redirect_url
-      assert_equal URI.parse(response_service_url).host, response_uri.host
-      assert_equal URI.parse(response_service_url).path, response_uri.path
-      assert_not_equal URI.parse(relay_state).host, response_uri.host
-      response_params = Rack::Utils.parse_query response_uri.query
-      assert response_params['SAMLResponse'].present?
-      assert_equal relay_state, response_params['RelayState']
-      logout_response = OneLogin::RubySaml::Logoutresponse.new response_params['SAMLResponse']
-      assert_equal logout_request.id, logout_response.in_response_to
-      assert_saml_session_deleted
       assert_empty info_logs.grep(/\ADelete session for /)
     end
 
-    should 'fallback to the configured IdP SLO endpoint for an IdP initiated LogoutResponse' do
-      idp_slo_service_url = 'https://idp-slo.example.test/saml/logout'
-      RedmineSaml.configured_saml.delete :idp_slo_response_service_url
-      RedmineSaml.configured_saml[:idp_slo_service_url] = idp_slo_service_url
-      Rails.logger.expects(:warn).with(regexp_matches(/\AOpen redirect to /)).never
+    should 'use an IdP SLO response URL with a query when the service URL is queryless' do
+      assert_idp_logout_response_url service_url: 'https://idp-slo.example.test/saml/logout',
+                                      response_url: 'https://idp-response.example.test/saml/logout?response=original'
+    end
 
-      get :redirect_after_saml_logout,
-          params: signed_logout_request_params
+    should 'use an IdP SLO response URL with a query when the service URL also has a query' do
+      assert_idp_logout_response_url service_url: 'https://idp-slo.example.test/saml/logout?service=original',
+                                      response_url: 'https://idp-response.example.test/saml/logout?response=original'
+    end
 
-      assert_response :redirect
-      response_uri = URI.parse @response.redirect_url
-      assert_equal URI.parse(idp_slo_service_url).host, response_uri.host
-      assert_equal URI.parse(idp_slo_service_url).path, response_uri.path
-      response_params = Rack::Utils.parse_query response_uri.query
-      assert response_params['SAMLResponse'].present?
-      assert_saml_session_deleted
+    should 'sign a LogoutResponse after correcting the response endpoint query separator' do
+      configure_logout_response_signing
+
+      response_params = assert_idp_logout_response_url(
+        service_url: 'https://idp-slo.example.test/saml/logout?service=original',
+        response_url: 'https://idp-response.example.test/saml/logout'
+      )
+
+      assert_valid_logout_response_signature response_params
+    end
+
+    should 'preserve sp_cert_multi while signing a LogoutResponse with a response URL query' do
+      configure_logout_response_signing sp_cert_multi: true
+
+      response_params = assert_idp_logout_response_url(
+        service_url: 'https://idp-slo.example.test/saml/logout',
+        response_url: 'https://idp-response.example.test/saml/logout?response=original'
+      )
+
+      assert_valid_logout_response_signature response_params
+    end
+
+    should 'copy LogoutResponse settings without mutating endpoints or credentials' do
+      settings = logout_response_copy_test_settings
+      original_security = settings.security.deep_dup
+      original_sp_cert_multi = settings.sp_cert_multi.deep_dup
+
+      response_settings = @controller.send :saml_logout_response_settings, settings
+
+      assert_not_equal settings.object_id, response_settings.object_id
+      assert_equal 'https://idp-slo.example.test/saml/logout?service=original', settings.idp_slo_service_url
+      assert_equal 'https://idp-response.example.test/saml/logout', settings.idp_slo_response_service_url
+      assert_equal settings.idp_slo_response_service_url, response_settings.idp_slo_service_url
+      assert_equal settings.idp_slo_response_service_url, response_settings.idp_slo_response_service_url
+      assert_equal original_security, settings.security
+      assert_equal original_security, response_settings.security
+      assert_equal 'ORIGINAL_SP_CERTIFICATE', settings.certificate
+      assert_equal 'ORIGINAL_SP_CERTIFICATE', response_settings.certificate
+      assert_equal 'ORIGINAL_SP_PRIVATE_KEY', settings.private_key
+      assert_equal 'ORIGINAL_SP_PRIVATE_KEY', response_settings.private_key
+      assert_equal original_sp_cert_multi, settings.sp_cert_multi
+      assert_equal original_sp_cert_multi, response_settings.sp_cert_multi
+      assert_not settings.compress_request
+      assert_not response_settings.compress_request
+      assert_not settings.compress_response
+      assert_not response_settings.compress_response
+
+      settings_without_response_url = logout_response_copy_test_settings
+      settings_without_response_url.idp_slo_response_service_url = ''
+      response_settings_without_response_url = @controller.send(
+        :saml_logout_response_settings,
+        settings_without_response_url
+      )
+      assert_equal settings_without_response_url.idp_slo_service_url,
+                   response_settings_without_response_url.idp_slo_service_url
+      assert_equal '', settings_without_response_url.idp_slo_response_service_url
     end
 
     should 'accept a Redirect LogoutRequest signed with the IdP raw percent encoding' do
@@ -865,6 +915,102 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     config.delete :idp_cert_fingerprint
     config[:single_logout_service_url] = TEST_SLS_URL
     config[:name_identifier_value] = 'mail'
+  end
+
+  def assert_idp_logout_response_url(service_url:, response_url: nil,
+                                      relay_state: 'https://attacker.example/after-logout?next=/admin')
+    config = RedmineSaml.configured_saml
+    config[:idp_slo_service_url] = service_url
+    if response_url
+      config[:idp_slo_response_service_url] = response_url
+    else
+      config.delete :idp_slo_response_service_url
+    end
+    original_config = config.deep_dup
+    original_config_id = config.object_id
+    expected_url = response_url || service_url
+    logout_params = signed_logout_request_params relay_state: relay_state
+    logout_request = OneLogin::RubySaml::SloLogoutrequest.new logout_params['SAMLRequest']
+
+    get :redirect_after_saml_logout, params: logout_params
+
+    assert_response :redirect
+    response_uri = URI.parse @response.redirect_url
+    expected_uri = URI.parse expected_url
+    assert_equal expected_uri.scheme, response_uri.scheme
+    assert_equal expected_uri.host, response_uri.host
+    assert_equal expected_uri.path, response_uri.path
+    separator = expected_uri.query.present? ? '&' : '?'
+    assert_includes @response.redirect_url, "#{expected_url}#{separator}SAMLResponse="
+    response_params = Rack::Utils.parse_query response_uri.query
+    Rack::Utils.parse_query(expected_uri.query.to_s).each do |key, value|
+      assert_equal value, response_params[key]
+    end
+    assert response_params['SAMLResponse'].present?
+    assert_equal relay_state, response_params['RelayState']
+    assert_not_equal URI.parse(relay_state).host, response_uri.host
+    logout_response = OneLogin::RubySaml::Logoutresponse.new response_params['SAMLResponse']
+    assert_equal expected_url, logout_response.document.root.attributes['Destination']
+    assert_equal logout_request.id, logout_response.in_response_to
+    assert_equal original_config_id, RedmineSaml.configured_saml.object_id
+    assert_equal original_config, RedmineSaml.configured_saml
+    assert_saml_session_deleted
+
+    response_params
+  end
+
+  def configure_logout_response_signing(sp_cert_multi: false)
+    config = RedmineSaml.configured_saml
+    config[:security] = config.fetch(:security, {}).merge(
+      logout_responses_signed: true,
+      signature_method: XMLSecurity::Document::RSA_SHA256,
+      digest_method: XMLSecurity::Document::SHA256
+    )
+    certificate = self.class.slo_test_certificate.to_pem
+    private_key = self.class.slo_test_private_key.to_pem
+
+    if sp_cert_multi
+      config.delete :certificate
+      config.delete :private_key
+      config[:sp_cert_multi] = {
+        signing: [{ certificate: certificate, private_key: private_key }]
+      }
+    else
+      config[:certificate] = certificate
+      config[:private_key] = private_key
+      config.delete :sp_cert_multi
+    end
+  end
+
+  def assert_valid_logout_response_signature(response_params)
+    assert_equal XMLSecurity::Document::RSA_SHA256, response_params['SigAlg']
+    assert response_params['Signature'].present?
+    signed_query = OneLogin::RubySaml::Utils.build_query(
+      type: 'SAMLResponse',
+      data: response_params['SAMLResponse'],
+      relay_state: response_params['RelayState'],
+      sig_alg: response_params['SigAlg']
+    )
+    signature = Base64.strict_decode64 response_params['Signature']
+    digest = OpenSSL::Digest.new 'SHA256'
+
+    assert self.class.slo_test_private_key.public_key.verify(digest, signature, signed_query)
+  end
+
+  def logout_response_copy_test_settings
+    OneLogin::RubySaml::Settings.new.tap do |settings|
+      settings.idp_slo_service_url = 'https://idp-slo.example.test/saml/logout?service=original'
+      settings.idp_slo_response_service_url = 'https://idp-response.example.test/saml/logout'
+      settings.certificate = 'ORIGINAL_SP_CERTIFICATE'
+      settings.private_key = 'ORIGINAL_SP_PRIVATE_KEY'
+      settings.sp_cert_multi = {
+        signing: [{ certificate: 'MULTI_SP_CERTIFICATE', private_key: 'MULTI_SP_PRIVATE_KEY' }]
+      }
+      settings.security[:logout_responses_signed] = true
+      settings.security[:signature_method] = XMLSecurity::Document::RSA_SHA256
+      settings.compress_request = false
+      settings.compress_response = false
+    end
   end
 
   def configure_fingerprint_only_slo(certificate = self.class.slo_test_certificate)
