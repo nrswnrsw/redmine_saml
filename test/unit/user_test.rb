@@ -103,9 +103,9 @@ class UserTest < RedmineSaml::TestCase
                                   mail: 'legacy-four-mappings@example.com'
 
         found_user = User.find_or_create_from_omniauth saml_login: user.login,
-                                                        mail: 'mapped@example.com',
-                                                        first_name: 'Mapped',
-                                                        last_name: 'Name'
+                                                       mail: 'mapped@example.com',
+                                                       first_name: 'Mapped',
+                                                       last_name: 'Name'
 
         assert_equal user.id, found_user.id
       end
@@ -136,9 +136,9 @@ class UserTest < RedmineSaml::TestCase
                                   lastname: 'Stored Last'
 
         found_user = User.find_or_create_from_omniauth saml_login: user.login,
-                                                        mail: 'changed@example.com',
-                                                        first_name: 'Mapped First',
-                                                        last_name: 'Mapped Last'
+                                                       mail: 'changed@example.com',
+                                                       first_name: 'Mapped First',
+                                                       last_name: 'Mapped Last'
 
         assert_equal 'Mapped First', found_user.firstname
         assert_equal 'Mapped Last', found_user.lastname
@@ -157,9 +157,9 @@ class UserTest < RedmineSaml::TestCase
                                   mail: 'legacy-login-lookup@example.com'
 
         found_user = User.find_or_create_from_omniauth saml_login: 'mapped-login',
-                                                        mail: user.mail,
-                                                        first_name: 'Mapped First',
-                                                        last_name: 'Mapped Last'
+                                                       mail: user.mail,
+                                                       first_name: 'Mapped First',
+                                                       last_name: 'Mapped Last'
 
         assert_equal user.id, found_user.id
         assert_equal 'legacy-stored-login', found_user.login
@@ -172,7 +172,7 @@ class UserTest < RedmineSaml::TestCase
                                   admin: false
 
         found_user = User.find_or_create_from_omniauth saml_login: user.login,
-                                                        admin: true
+                                                       admin: true
 
         assert_not found_user.admin
         assert_not found_user.reload.admin
@@ -184,7 +184,7 @@ class UserTest < RedmineSaml::TestCase
                                   admin: true
 
         found_user = User.find_or_create_from_omniauth saml_login: user.login,
-                                                        admin: false
+                                                       admin: false
 
         assert found_user.admin
         assert found_user.reload.admin
@@ -200,8 +200,8 @@ class UserTest < RedmineSaml::TestCase
 
         with_on_login_callback callback do
           User.find_or_create_from_omniauth saml_login: user.login,
-                                                first_name: 'Hook First',
-                                                last_name: 'Hook Last'
+                                            first_name: 'Hook First',
+                                            last_name: 'Hook Last'
         end
 
         assert_equal ['Hook First', 'Hook Last'], hook_names
@@ -219,8 +219,8 @@ class UserTest < RedmineSaml::TestCase
 
         with_on_login_callback callback do
           User.find_or_create_from_omniauth saml_login: user.login,
-                                                first_name: 'Hook First',
-                                                last_name: 'Hook Last'
+                                            first_name: 'Hook First',
+                                            last_name: 'Hook Last'
         end
 
         user.reload
