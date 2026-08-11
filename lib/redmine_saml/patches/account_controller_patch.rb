@@ -31,7 +31,7 @@ module RedmineSaml
         end
 
         def login_with_saml_redirect
-          redirect_to ::RedmineSaml.configured_saml['idp_sso_service_url']
+          redirect_to ::RedmineSaml.configured_saml['idp_sso_service_url'], allow_other_host: true
         end
 
         def login_with_saml_callback
@@ -130,7 +130,7 @@ module RedmineSaml
                                                                              RelayState: params[:RelayState]
 
           # Actually log out this session only after validation and response generation succeed.
-          redirect_to logout_response
+          redirect_to logout_response, allow_other_host: true
           saml_logout_user
         rescue StandardError => e
           reason = "LogoutRequest validation raised #{e.class}"

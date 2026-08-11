@@ -42,6 +42,21 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
   end
 
   context 'GET login_with_saml_redirect' do
+    should 'redirect to the configured external IdP without an open redirect warning' do
+      idp_sso_service_url = 'https://trusted-idp.example.test/saml/login'
+      RedmineSaml.configured_saml[:idp_sso_service_url] = idp_sso_service_url
+      Rails.logger.expects(:warn).with(regexp_matches(/\AOpen redirect to /)).never
+
+      get :login_with_saml_redirect,
+          params: {
+            provider: 'saml',
+            origin: 'https://attacker.example/origin'
+          }
+
+      assert_redirected_to idp_sso_service_url
+      assert_equal 'trusted-idp.example.test', URI.parse(@response.redirect_url).host
+    end
+
     should 'redirect to /login without starting SAML authentication when SAML is disabled' do
       change_saml_settings saml_enabled: 0
 
@@ -462,19 +477,47 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     end
 
     should 'process a valid IdP initiated LogoutRequest with a matching configured issuer' do
-      logout_params = signed_logout_request_params
+      response_service_url = 'https://idp-response.example.test/saml/logout'
+      relay_state = 'https://attacker.example/after-logout?next=/admin'
+      RedmineSaml.configured_saml[:idp_slo_response_service_url] = response_service_url
+      logout_params = signed_logout_request_params relay_state: relay_state
       logout_request = OneLogin::RubySaml::SloLogoutrequest.new logout_params['SAMLRequest']
       Rails.logger.expects(:error).with('IdP initiated LogoutRequest was not valid!').never
+      Rails.logger.expects(:warn).with(regexp_matches(/\AOpen redirect to /)).never
       info_logs = capture_info_logs
 
       get :redirect_after_saml_logout, params: logout_params
 
       assert_response :redirect
-      response_params = Rack::Utils.parse_query URI.parse(@response.redirect_url).query
+      response_uri = URI.parse @response.redirect_url
+      assert_equal URI.parse(response_service_url).host, response_uri.host
+      assert_equal URI.parse(response_service_url).path, response_uri.path
+      assert_not_equal URI.parse(relay_state).host, response_uri.host
+      response_params = Rack::Utils.parse_query response_uri.query
+      assert response_params['SAMLResponse'].present?
+      assert_equal relay_state, response_params['RelayState']
       logout_response = OneLogin::RubySaml::Logoutresponse.new response_params['SAMLResponse']
       assert_equal logout_request.id, logout_response.in_response_to
       assert_saml_session_deleted
       assert_empty info_logs.grep(/\ADelete session for /)
+    end
+
+    should 'fallback to the configured IdP SLO endpoint for an IdP initiated LogoutResponse' do
+      idp_slo_service_url = 'https://idp-slo.example.test/saml/logout'
+      RedmineSaml.configured_saml.delete :idp_slo_response_service_url
+      RedmineSaml.configured_saml[:idp_slo_service_url] = idp_slo_service_url
+      Rails.logger.expects(:warn).with(regexp_matches(/\AOpen redirect to /)).never
+
+      get :redirect_after_saml_logout,
+          params: signed_logout_request_params
+
+      assert_response :redirect
+      response_uri = URI.parse @response.redirect_url
+      assert_equal URI.parse(idp_slo_service_url).host, response_uri.host
+      assert_equal URI.parse(idp_slo_service_url).path, response_uri.path
+      response_params = Rack::Utils.parse_query response_uri.query
+      assert response_params['SAMLResponse'].present?
+      assert_saml_session_deleted
     end
 
     should 'accept a Redirect LogoutRequest signed with the IdP raw percent encoding' do
@@ -860,10 +903,10 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     end
   end
 
-  def signed_logout_request_params(**options)
+  def signed_logout_request_params(relay_state: home_url, **options)
     OneLogin::RubySaml::Logoutrequest.new.create_params(
       incoming_slo_settings(**options),
-      'RelayState' => home_url
+      'RelayState' => relay_state
     )
   end
 
