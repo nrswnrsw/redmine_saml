@@ -6,7 +6,7 @@ table.list.saml-config.autoscroll
       th = l :field_name
       th = l :field_value
   tbody
-    - RedmineSaml.configured_saml.each do |key, config|
+    - saml_settings_for_display(RedmineSaml.configured_saml).each do |key, config|
       tr
         td.name = key
         td.value style="text-align: left;"
