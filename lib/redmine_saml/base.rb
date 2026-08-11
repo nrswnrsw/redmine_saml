@@ -118,9 +118,7 @@ module RedmineSaml
       def saml_response_for_logging(response_object)
         return unless response_object.respond_to? :response
 
-        decrypted_document = if response_object.respond_to? :decrypted_document
-                               response_object.decrypted_document&.to_s
-                             end
+        decrypted_document = (response_object.decrypted_document&.to_s if response_object.respond_to? :decrypted_document)
 
         {
           response: response_object.response.to_s,

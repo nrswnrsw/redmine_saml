@@ -99,8 +99,8 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       assert_equal 1, attribute_logs.size
 
       (callback_logs + attribute_logs).each do |message|
-        assert_includes message, response_xml
-        assert_includes message, decrypted_document.to_s
+        assert_includes message, "response=#{response_xml.inspect}"
+        assert_includes message, "decrypted_document=#{decrypted_document.to_s.inspect}"
         assert_includes message, 'DECRYPTED_ASSERTION_LOG_FIXTURE'
         assert_includes message, '_name-id-for-safe-log-test'
         assert_includes message, '_session-index-for-safe-log-test'
@@ -828,7 +828,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
         signing: [{ certificate: 'PUBLIC_SP_CERTIFICATE', private_key: private_keys.last }]
       }
     )
-    response_xml = <<~XML.delete("\n")
+    response_xml = <<~XML.delete "\n"
       <samlp:Response Destination="https://sp.example.test/auth/saml/callback" InResponseTo="_request-id" ID="_response-id">
         <saml:Issuer>https://idp.example.test/metadata</saml:Issuer>
         <ds:Signature><ds:X509Certificate>IDP_CERTIFICATE_LOG_FIXTURE</ds:X509Certificate></ds:Signature>
