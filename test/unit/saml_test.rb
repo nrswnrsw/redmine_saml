@@ -35,4 +35,66 @@ class SAMLTest < RedmineSaml::TestCase
       assert_equal val, RedmineSaml.saml_login_label
     end
   end
+
+  context 'legacy attribute mapping compatibility' do
+    should 'require only login mail firstname and lastname' do
+      assert_equal %i[login firstname lastname mail],
+                   RedmineSaml::Base.send(:required_attribute_mapping)
+    end
+
+    should 'reject an existing alphanodes initializer missing any required mapping' do
+      mapping = { login: 'saml_login',
+                  mail: 'mail',
+                  firstname: 'first_name',
+                  lastname: 'last_name' }
+
+      mapping.each_key do |required_key|
+        error = assert_raises RuntimeError do
+          configure_legacy_attribute_mapping mapping.except(required_key)
+        end
+        assert_equal "RedmineSaml.configure requires saml.attribute_mapping[#{required_key}] to be set",
+                     error.message
+      end
+    end
+
+    should 'configure without an admin mapping for existing alphanodes initializers' do
+      mapping = { login: 'saml_login',
+                  mail: 'mail',
+                  firstname: 'first_name',
+                  lastname: 'last_name' }
+
+      assert_legacy_attribute_mapping_configures mapping
+    end
+
+    should 'configure with an unused admin mapping for existing alphanodes initializers' do
+      mapping = attribute_mapping_mock
+
+      assert_legacy_attribute_mapping_configures mapping
+    end
+  end
+
+  private
+
+  def assert_legacy_attribute_mapping_configures(mapping)
+    configured_mapping = nil
+    RedmineSaml::Base.expects(:configure_omniauth_saml_middleware).once
+
+    assert_nothing_raised do
+      configured_mapping = configure_legacy_attribute_mapping mapping
+    end
+    assert_equal mapping.with_indifferent_access, configured_mapping
+  end
+
+  def configure_legacy_attribute_mapping(mapping)
+    original_saml = RedmineSaml::Base.saml
+    original_validation = RedmineSaml::Base.instance_variable_get :@validated_configuration
+    saml = original_saml.deep_dup
+    saml[:attribute_mapping] = mapping
+
+    RedmineSaml::Base.configure { |config| config.saml = saml }
+    RedmineSaml.configured_saml[:attribute_mapping].deep_dup
+  ensure
+    RedmineSaml::Base.instance_variable_set :@saml, original_saml
+    RedmineSaml::Base.instance_variable_set :@validated_configuration, original_validation
+  end
 end
