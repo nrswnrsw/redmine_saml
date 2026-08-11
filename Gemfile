@@ -14,7 +14,7 @@ end
 group :development do
   # this is only used for development.
   # if you want to use it, do:
-  # - create .enable_dev file in additionals directory
+  # - create .enable_dev file in redmine_saml directory
   # - remove rubocop entries from REDMINE/Gemfile
   # - remove REDMINE/.rubocop* files
   if File.file? File.expand_path './.enable_dev', __dir__
