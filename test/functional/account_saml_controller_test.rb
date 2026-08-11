@@ -81,6 +81,45 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       assert_equal users(:users_001), User.current
     end
 
+    should 'log SAML authentication details without ruby-saml Settings credentials' do
+      auth, response, response_xml, decrypted_document, private_keys = saml_auth_hash_with_private_keys
+      logged_messages = []
+      Rails.logger.stubs(:info).with do |message|
+        logged_messages << message
+        true
+      end
+      request.env['omniauth.auth'] = auth
+
+      get :login_with_saml_callback,
+          params: { provider: 'saml' }
+
+      callback_logs = logged_messages.grep(/\Alogin_with_saml_callback: /)
+      attribute_logs = logged_messages.grep(/\Auser_attributes_from_saml: /)
+      assert_equal 1, callback_logs.size
+      assert_equal 1, attribute_logs.size
+
+      (callback_logs + attribute_logs).each do |message|
+        assert_includes message, response_xml
+        assert_includes message, decrypted_document.to_s
+        assert_includes message, 'DECRYPTED_ASSERTION_LOG_FIXTURE'
+        assert_includes message, '_name-id-for-safe-log-test'
+        assert_includes message, '_session-index-for-safe-log-test'
+        assert_includes message, 'department-for-safe-log-test'
+        assert_includes message, 'Engineering'
+        assert_includes message, 'admin@example.test'
+        assert_includes message, 'Redmine Admin'
+        assert_not_includes message, 'XMLSecurity::SignedDocument'
+        assert_not_includes message, 'OneLogin::RubySaml::Settings'
+        private_keys.each { |private_key| assert_not_includes message, private_key }
+      end
+
+      private_keys.each { |private_key| assert_includes auth.inspect, private_key }
+      assert_same response, auth[:extra][:response_object]
+      assert_same decrypted_document, response.decrypted_document
+      assert_equal private_keys.first, response.settings.private_key
+      assert_equal private_keys.last, response.settings.sp_cert_multi[:signing].first[:private_key]
+    end
+
     should 'update the Sudo Mode timestamp after successful SAML login' do
       started_at = Time.now.to_i
       request.env['omniauth.auth'] = { 'saml_login' => 'admin' }
@@ -779,6 +818,63 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     CGI.escape(value.to_s)
        .gsub(/%[0-9A-F]{2}/, &:downcase)
        .sub('test.host', 'test%2ehost')
+  end
+
+  def saml_auth_hash_with_private_keys
+    private_keys = %w[VERY_SECRET_TEST_PRIVATE_KEY VERY_SECRET_TEST_SP_CERT_MULTI_PRIVATE_KEY]
+    settings = OneLogin::RubySaml::Settings.new(
+      private_key: private_keys.first,
+      sp_cert_multi: {
+        signing: [{ certificate: 'PUBLIC_SP_CERTIFICATE', private_key: private_keys.last }]
+      }
+    )
+    response_xml = <<~XML.delete("\n")
+      <samlp:Response Destination="https://sp.example.test/auth/saml/callback" InResponseTo="_request-id" ID="_response-id">
+        <saml:Issuer>https://idp.example.test/metadata</saml:Issuer>
+        <ds:Signature><ds:X509Certificate>IDP_CERTIFICATE_LOG_FIXTURE</ds:X509Certificate></ds:Signature>
+        <saml:Assertion>
+          <saml:Subject><saml:NameID>_name-id-for-safe-log-test</saml:NameID></saml:Subject>
+          <saml:Conditions>
+            <saml:AudienceRestriction><saml:Audience>https://sp.example.test</saml:Audience></saml:AudienceRestriction>
+          </saml:Conditions>
+          <saml:AuthnStatement SessionIndex="_session-index-for-safe-log-test">
+            <saml:AuthnContext><saml:AuthnContextClassRef>urn:test:authn-context</saml:AuthnContextClassRef></saml:AuthnContext>
+          </saml:AuthnStatement>
+        </saml:Assertion>
+      </samlp:Response>
+    XML
+    response = OneLogin::RubySaml::Response.allocate
+    response.instance_variable_set :@response, response_xml
+    decrypted_document = XMLSecurity::SignedDocument.new(
+      '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol">' \
+      '<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">' \
+      'DECRYPTED_ASSERTION_LOG_FIXTURE' \
+      '</saml:Assertion></samlp:Response>'
+    )
+    response.instance_variable_set :@decrypted_document, decrypted_document
+    response.settings = settings
+    raw_info = OneLogin::RubySaml::Attributes.new(
+      'department-for-safe-log-test' => ['Engineering'],
+      'email' => ['admin@example.test']
+    )
+    auth = OmniAuth::AuthHash.new(
+      provider: 'saml',
+      uid: '_name-id-for-safe-log-test',
+      info: {
+        email: 'admin@example.test',
+        name: 'Redmine Admin',
+        first_name: 'Redmine',
+        last_name: 'Admin'
+      },
+      extra: {
+        raw_info: raw_info,
+        session_index: '_session-index-for-safe-log-test',
+        response_object: response
+      },
+      saml_login: 'admin'
+    )
+
+    [auth, response, response_xml, decrypted_document, private_keys]
   end
 
   def get_saml_logout_with_raw_query(decoded_params, raw_query)

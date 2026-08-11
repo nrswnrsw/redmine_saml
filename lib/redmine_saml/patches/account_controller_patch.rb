@@ -36,7 +36,7 @@ module RedmineSaml
 
         def login_with_saml_callback
           auth = request.env['omniauth.auth']
-          Rails.logger.info "login_with_saml_callback: #{auth.inspect}"
+          Rails.logger.info "login_with_saml_callback: #{RedmineSaml::Base.auth_hash_for_logging auth}"
           user = User.find_or_create_from_omniauth auth
 
           # taken from original AccountController
