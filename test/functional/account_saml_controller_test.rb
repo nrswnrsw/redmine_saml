@@ -905,6 +905,127 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     end
   end
 
+  context 'SAML Destination fallback for legacy initializers' do
+    setup do
+      establish_saml_session
+    end
+
+    should 'accept a signed Redirect LogoutRequest for the derived SLS URL' do
+      configure_derived_slo_destination
+
+      get :redirect_after_saml_logout, params: signed_logout_request_params
+
+      assert_response :redirect
+      assert_saml_session_deleted
+    end
+
+    should 'accept a signed POST LogoutRequest for the derived SLS URL' do
+      configure_derived_slo_destination
+
+      with_forgery_protection do
+        post :redirect_after_saml_logout,
+             params: signed_logout_request_params(binding: :post, session_index: session['saml_session_index'])
+      end
+
+      assert_response :redirect
+      assert_saml_session_deleted
+    end
+
+    should 'accept a signed LogoutResponse for the derived SLS URL' do
+      configure_derived_slo_destination
+      session[:transaction_id] = '_expected-request-id'
+
+      get :redirect_after_saml_logout,
+          params: signed_logout_response_params(request_id: session[:transaction_id])
+
+      assert_redirected_to home_path
+      assert_saml_session_deleted
+    end
+
+    should 'reject a LogoutRequest for a Destination other than the derived SLS URL' do
+      configure_derived_slo_destination
+
+      get :redirect_after_saml_logout,
+          params: signed_logout_request_params(destination: 'http://test.host/auth/saml/other-sls')
+
+      assert_response :bad_request
+      assert_saml_session_active
+    end
+
+    should 'reject a LogoutRequest when the SLS URL cannot be derived from the callback URL' do
+      configure_derived_slo_destination
+      RedmineSaml.configured_saml[:assertion_consumer_service_url] = 'http://test.host/auth/saml/acs'
+
+      get :redirect_after_saml_logout, params: signed_logout_request_params
+
+      assert_response :bad_request
+      assert_saml_session_active
+    end
+
+    should 'prefer a configured single_logout_service_url over the derived SLS URL' do
+      RedmineSaml.configured_saml[:assertion_consumer_service_url] =
+        "http://derived.example.test#{RedmineSaml::CALLBACK_PATH}"
+
+      get :redirect_after_saml_logout,
+          params: signed_logout_request_params(destination: 'http://derived.example.test/auth/saml/sls')
+
+      assert_response :bad_request
+      assert_saml_session_active
+    end
+
+    should 'derive the SLS URL under a relative URL root' do
+      configure_derived_slo_destination 'http://test.host/redmine'
+
+      get :redirect_after_saml_logout,
+          params: signed_logout_request_params(destination: 'http://test.host/redmine/auth/saml/sls')
+
+      assert_response :redirect
+      assert_saml_session_deleted
+    end
+
+    should 'still reject an unsigned LogoutRequest for the derived SLS URL' do
+      configure_derived_slo_destination
+      logout_params = signed_logout_request_params
+      logout_params.delete 'Signature'
+      logout_params.delete 'SigAlg'
+
+      get :redirect_after_saml_logout, params: logout_params
+
+      assert_response :bad_request
+      assert_saml_session_active
+    end
+
+    should 'still reject a LogoutRequest from another issuer for the derived SLS URL' do
+      configure_derived_slo_destination
+
+      get :redirect_after_saml_logout,
+          params: signed_logout_request_params(issuer: 'https://unexpected.example.test/metadata')
+
+      assert_response :bad_request
+      assert_saml_session_active
+    end
+
+    should 'still reject a LogoutRequest for another NameID for the derived SLS URL' do
+      configure_derived_slo_destination
+
+      get :redirect_after_saml_logout,
+          params: signed_logout_request_params(name_id: 'another-user@example.test')
+
+      assert_response :bad_request
+      assert_saml_session_active
+    end
+
+    should 'still reject a LogoutRequest for another SAML session index for the derived SLS URL' do
+      configure_derived_slo_destination
+
+      get :redirect_after_saml_logout,
+          params: signed_logout_request_params(session_index: '_another-session-index')
+
+      assert_response :bad_request
+      assert_saml_session_active
+    end
+  end
+
   context 'SameSite cross-site POST SLO fallback' do
     setup do
       establish_saml_session
@@ -1363,6 +1484,14 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       true
     end
     messages
+  end
+
+  # 1.0.6 initializers may omit single_logout_service_url. Line the callback URL
+  # up with the functional test host so the derived SLS URL equals TEST_SLS_URL.
+  def configure_derived_slo_destination(acs_prefix = 'http://test.host')
+    config = RedmineSaml.configured_saml
+    config.delete :single_logout_service_url
+    config[:assertion_consumer_service_url] = "#{acs_prefix}#{RedmineSaml::CALLBACK_PATH}"
   end
 
   # sp_logout_request gates SP initiated SLO on the presence of signout_url.

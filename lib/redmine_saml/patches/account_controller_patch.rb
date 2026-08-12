@@ -349,13 +349,33 @@ module RedmineSaml
         def valid_saml_message_context?(message, settings)
           expected_issuer = settings.idp_entity_id.to_s
           issuer = message.issuer.to_s
-          expected_destination = settings.single_logout_service_url.to_s
+          expected_destination = expected_saml_destination settings
           destination = message.document.root&.attributes&.[]('Destination').to_s
 
           issuer.present? &&
             (expected_issuer.blank? || issuer == expected_issuer) &&
             expected_destination.present? &&
             destination == expected_destination
+        end
+
+        def expected_saml_destination(settings)
+          configured = settings.single_logout_service_url.to_s
+          return configured if configured.present?
+
+          derived_saml_destination settings
+        end
+
+        # alphanodes 1.0.6 initializers may omit single_logout_service_url, which
+        # 1.0.6 never used for any SLO decision. Derive the SP SLS endpoint from
+        # assertion_consumer_service_url, required since 1.0.6, instead of
+        # weakening the Destination check. Returns an empty String when the ACS
+        # URL does not identify this plugin's callback endpoint, so that the
+        # caller's present? guard still rejects the message.
+        def derived_saml_destination(settings)
+          acs = settings.assertion_consumer_service_url.to_s
+          return '' unless acs.end_with? RedmineSaml::CALLBACK_PATH
+
+          "#{acs.delete_suffix RedmineSaml::CALLBACK_PATH}#{RedmineSaml::LOGOUT_SERVICE_PATH}"
         end
 
         def valid_saml_name_id?(name_id)

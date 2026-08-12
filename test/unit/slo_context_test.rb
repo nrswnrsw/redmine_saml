@@ -78,4 +78,14 @@ class SloContextTest < RedmineSaml::TestCase
     assert RedmineSaml::SloContext.load_pending(serialized, settings: @settings, now: @now + 5.minutes)
     assert_nil RedmineSaml::SloContext.load_pending(serialized, settings: @settings, now: @now + 5.minutes + 1.second)
   end
+
+  test 'config digest keys and their meaning are unchanged' do
+    assert_equal %i[sp_entity_id idp_entity_id single_logout_service_url idp_slo_service_url idp_slo_response_service_url],
+                 RedmineSaml::SloContext::CONFIG_KEYS
+
+    changed_settings = @settings.merge single_logout_service_url: 'https://changed.example.test/auth/saml/sls'
+
+    assert_not_equal RedmineSaml::SloContext.config_digest(@settings),
+                     RedmineSaml::SloContext.config_digest(changed_settings)
+  end
 end
