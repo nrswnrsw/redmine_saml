@@ -113,6 +113,8 @@ When an authenticated SAML user signs out through Redmine, the plugin creates a 
 
 IdP-initiated logout is accepted only for an active SAML session. The plugin validates the signed LogoutRequest and its SAML context before ending the local Redmine session and returning a LogoutResponse to the configured IdP endpoint. An unvalidated external request does not delete the Redmine session.
 
+On HTTPS deployments, cross-site HTTP-POST SLO can use a dedicated, short-lived `SameSite=None; Secure` cookie fallback. This fallback is limited to SLO and does not globally change the normal Redmine session cookie settings. HTTP deployments do not use the fallback and retain the existing session-based path; HTTPS is not a new general requirement for SAML login.
+
 ### Certificates, fingerprints, and SLO bindings
 
 Use `idp_cert` for the normal configuration, or `idp_cert_multi` when multiple trusted IdP certificates are needed for certificate rollover. Full public certificates allow the plugin to verify both embedded XML signatures and HTTP-Redirect query signatures.
@@ -124,6 +126,10 @@ Fingerprint-only configuration remains supported for existing deployments and no
 - Fingerprint-only HTTP-Redirect SLO is rejected rather than bypassing signature validation.
 
 Do not configure `idp_cert`, `idp_cert_multi`, and `idp_cert_fingerprint` as simultaneous alternatives. The sample initializer uses `idp_cert` by default and shows the other approaches as commented alternatives.
+
+### Production logging
+
+For troubleshooting compatibility, INFO logs may include the SAML Response and mapped attributes. SP private keys and other secrets are redacted, but SAML Responses and attributes may contain personal information. Restrict access to production logs and manage their retention period appropriately.
 
 ## Uninstall
 
@@ -139,7 +145,7 @@ Restart the Redmine application server after uninstalling the plugin.
 
 ## Support and contribution
 
-The currently maintained repository is [nrswnrsw/redmine_saml](https://github.com/nrswnrsw/redmine_saml). Please use its [issue tracker](https://github.com/nrswnrsw/redmine_saml/issues) for bug reports and feature requests. Pull requests are welcome.
+The currently maintained repository is [nrswnrsw/redmine_saml](https://github.com/nrswnrsw/redmine_saml). This is a maintainer-managed project; public Issue and Pull Request contributions are not accepted. The source remains available for viewing, cloning, and forking.
 
 ## Credits
 

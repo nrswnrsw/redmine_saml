@@ -2,7 +2,7 @@
 
 This file records notable user-facing changes to the maintained `nrswnrsw/redmine_saml` releases. Version 1.1.0 is the first maintained release based on the original `alphanodes/redmine_saml` 1.0.6 release and subsequent upstream work.
 
-## [1.1.0] - Unreleased
+## [1.1.0] - 2026-08-12
 
 ### Backward compatibility
 
