@@ -2,7 +2,7 @@
   = javascript_include_tag 'saml_request', plugin: 'redmine_saml', defer: true
 
 #saml-request-bridge
-  = form_with url: login_with_saml_redirect_path(provider: 'saml'),
+  = form_with url: login_with_saml_redirect_path(provider: 'saml', script_name: request.script_name),
               method: :post,
               local: true,
               id: 'saml-request-form' do |f|

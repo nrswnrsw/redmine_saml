@@ -920,10 +920,10 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
 
       get :login_with_saml_callback, params: { provider: 'saml' }
 
-      set_cookie = set_cookie_header_for RedmineSaml::SloCookie::ACTIVE_NAME
+      set_cookie = cookie_header_for RedmineSaml::SloCookie::ACTIVE_NAME
       assert set_cookie
       assert_includes set_cookie, RedmineSaml::SloCookie::ACTIVE_NAME
-      assert_match(/path=\/redmine\/auth\/saml\/sls/i, set_cookie)
+      assert_match %r{path=/redmine/auth/saml/sls}i, set_cookie
       assert_match(/secure/i, set_cookie)
       assert_match(/httponly/i, set_cookie)
       assert_match(/samesite=none/i, set_cookie)
@@ -971,7 +971,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       transaction_id = session[:transaction_id]
       pending_context = session[:saml_logout_context].deep_dup
       token_id = pending_context['token_id']
-      set_cookie = set_cookie_header_for RedmineSaml::SloCookie::PENDING_NAME
+      set_cookie = cookie_header_for RedmineSaml::SloCookie::PENDING_NAME
       assert set_cookie
       assert_includes set_cookie, RedmineSaml::SloCookie::PENDING_NAME
       assert_match(/expires=/i, set_cookie)
@@ -1084,7 +1084,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       post :logout
       transaction_id = session[:transaction_id]
       token_id = session[:saml_logout_context]['token_id']
-      session[:saml_logout_context] = session[:saml_logout_context].merge('transaction_id' => '_conflicting-id')
+      session[:saml_logout_context] = session[:saml_logout_context].merge 'transaction_id' => '_conflicting-id'
 
       use_https
       post :redirect_after_saml_logout,
@@ -1122,7 +1122,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       assert_nil read_active_slo_cookie
       set_cookie = response.headers['Set-Cookie'].to_s
       assert_includes set_cookie, Rails.application.config.session_options[:key]
-      autologin_cookie = set_cookie_header_for autologin_name
+      autologin_cookie = cookie_header_for autologin_name
       assert autologin_cookie
       assert_match(/\A#{Regexp.escape autologin_name}=;/, autologin_cookie)
       assert_match(/expires=/i, autologin_cookie)
@@ -1174,7 +1174,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       session.clear
       session[:user_id] = users(:users_001).id
       session[:tk] = current_value
-      User.current = users(:users_001)
+      User.current = users :users_001
 
       use_https
       post :redirect_after_saml_logout,
@@ -1197,11 +1197,11 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
 
       assert_response :redirect
       [RedmineSaml::SloCookie::ACTIVE_NAME, RedmineSaml::SloCookie::PENDING_NAME].each do |name|
-        deletion_cookie = set_cookie_header_for name
+        deletion_cookie = cookie_header_for name
         assert deletion_cookie
         assert_match(/\A#{Regexp.escape name}=;/, deletion_cookie)
         assert_match(/expires=/i, deletion_cookie)
-        assert_match(/path=\/redmine\/auth\/saml\/sls/i, deletion_cookie)
+        assert_match %r{path=/redmine/auth/saml/sls}i, deletion_cookie
       end
       assert_saml_session_deleted
     ensure
@@ -1223,7 +1223,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
 
     should 'keep the exact session Token for a stale or mismatched active context' do
       target_token = current_session_token
-      context = active_context(target_token)
+      context = active_context target_token
       write_active_slo_cookie context.merge('token_verifier' => '0' * 64)
       remove_main_saml_session
 
@@ -1691,7 +1691,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     @controller.send :clear_slo_cookies
   end
 
-  def set_cookie_header_for(name)
+  def cookie_header_for(name)
     headers = Array.wrap(response.headers['Set-Cookie']).flat_map { |header| header.to_s.split "\n" }
     headers.find { |header| header.start_with? "#{name}=" }
   end

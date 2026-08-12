@@ -548,7 +548,7 @@ module RedmineSaml
                            end
 
           if pending_session
-            valid_cookie_context = cookie_context if RedmineSaml::SloTokenStore.valid_transaction(cookie_context)
+            valid_cookie_context = cookie_context if RedmineSaml::SloTokenStore.valid_transaction cookie_context
             if valid_cookie_context
               return { error: 'conflicting SAML logout context' } unless legacy_pending_matches_cookie? valid_cookie_context
               if session_context && !RedmineSaml::SloContext.matching_pending_contexts?(session_context, valid_cookie_context)
@@ -586,7 +586,7 @@ module RedmineSaml
         end
 
         def slo_cookie
-          @slo_cookie ||= RedmineSaml::SloCookie.new self
+          @slo_cookie ||= RedmineSaml::SloCookie.new request: request, cookies: cookies
         end
 
         def clear_slo_cookies

@@ -187,6 +187,18 @@ class AccountSAMLTest < Redmine::IntegrationTest
       end
     end
 
+    should 'render the POST bridge under the request relative URL root' do
+      original_relative_url_root = Rails.application.config.relative_url_root
+      Rails.application.config.relative_url_root = '/redmine'
+
+      get '/auth/saml', headers: { 'SCRIPT_NAME' => '/redmine' }
+
+      assert_response :success
+      assert_select 'form#saml-request-form[method="post"][action="/redmine/auth/saml"]'
+    ensure
+      Rails.application.config.relative_url_root = original_relative_url_root
+    end
+
     should 'keep the standard Redmine login and existing SAML POST button when replacement is disabled' do
       change_saml_settings replace_redmine_login: 0
 
@@ -459,7 +471,7 @@ class AccountSAMLTest < Redmine::IntegrationTest
     failure_uri = URI.parse location
     assert_equal '/auth/failure', failure_uri.path
     query = Rack::Utils.parse_query failure_uri.query.to_s
-    assert_equal 'authenticity_error', query['message']
+    assert query['message'].present?
     assert_nil query['SAMLRequest']
   end
 

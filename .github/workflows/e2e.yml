@@ -247,8 +247,13 @@ jobs:
           user.save!
 
           saml_settings = Setting.plugin_redmine_saml.dup
-          saml_settings['replace_redmine_login'] = '1'
+          saml_settings[:replace_redmine_login] = '1'
           Setting.plugin_redmine_saml = saml_settings
+
+          puts "SAML enabled: #{RedmineSaml.enabled?}"
+          puts "Replace Redmine login: #{RedmineSaml.replace_redmine_login?}"
+          abort 'E2E SAML is disabled' unless RedmineSaml.enabled?
+          abort 'E2E replace_redmine_login is disabled' unless RedmineSaml.replace_redmine_login?
 
           puts "Created Redmine E2E user: #{user.login}"
           RUBY

@@ -5,16 +5,17 @@ module RedmineSaml
     ACTIVE_NAME = '__Secure-redmine_saml_slo_session'
     PENDING_NAME = '__Secure-redmine_saml_slo_transaction'
 
-    def initialize(controller)
-      @controller = controller
+    def initialize(request:, cookies:)
+      @request = request
+      @cookies = cookies
     end
 
     def active_present?
-      controller.request.ssl? && raw_cookie_present?(ACTIVE_NAME)
+      request.ssl? && raw_cookie_present?(ACTIVE_NAME)
     end
 
     def pending_present?
-      controller.request.ssl? && raw_cookie_present?(PENDING_NAME)
+      request.ssl? && raw_cookie_present?(PENDING_NAME)
     end
 
     def read_active
@@ -55,27 +56,26 @@ module RedmineSaml
 
     private
 
-    attr_reader :controller
+    attr_reader :request, :cookies
 
     def write(name, value, expires: nil)
-      return false unless controller.request.ssl?
+      return unless request.ssl?
 
       options = cookie_options.merge value: value
       options[:expires] = expires if expires
       encrypted_cookies[name] = options
-      true
     end
 
     def delete(name)
-      controller.cookies[name] = cookie_options.merge value: '', expires: 1.year.ago
+      cookies[name] = cookie_options.merge value: '', expires: 1.year.ago
     end
 
     def raw_cookie_present?(name)
-      controller.cookies[name].present?
+      cookies[name].present?
     end
 
     def encrypted_cookies
-      controller.cookies.encrypted
+      cookies.encrypted
     end
 
     def cookie_options
