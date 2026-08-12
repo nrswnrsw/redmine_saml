@@ -51,9 +51,13 @@ module RedmineSaml
         end
       end
 
+      # This is intentionally an explicit singleton-method wrapper, so that the
+      # existing Base.auth_hash_for_logging call surface stays unchanged.
+      # rubocop:disable Rails/Delegate
       def auth_hash_for_logging(omniauth)
         AuthHashLogging.auth_hash_for_logging omniauth
       end
+      # rubocop:enable Rails/Delegate
 
       def additionals_help_items
         [{ title: 'OmniAuth SAML',
