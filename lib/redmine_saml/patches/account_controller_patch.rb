@@ -2,11 +2,13 @@
 
 require_dependency 'account_controller'
 
+require_relative '../redirect_binding'
+
 module RedmineSaml
   module Patches
     module AccountControllerPatch
-      SAML_REDIRECT_QUERY_PARAMETERS = %w[SAMLRequest SAMLResponse RelayState SigAlg Signature].freeze
-      SAML_REDIRECT_RAW_PARAMETERS = %w[SAMLRequest SAMLResponse RelayState SigAlg].freeze
+      SAML_REDIRECT_QUERY_PARAMETERS = RedmineSaml::RedirectBinding::SAML_REDIRECT_QUERY_PARAMETERS
+      SAML_REDIRECT_RAW_PARAMETERS = RedmineSaml::RedirectBinding::SAML_REDIRECT_RAW_PARAMETERS
 
       extend ActiveSupport::Concern
 
@@ -116,7 +118,7 @@ module RedmineSaml
 
           options = { settings: settings }
           if saml_redirect_binding_request?
-            query_options = saml_redirect_query_options
+            query_options = RedmineSaml::RedirectBinding.query_options request
             return reject_idp_logout_request 'duplicate SAML query parameter' if query_options.blank?
 
             options.merge! query_options
@@ -199,7 +201,7 @@ module RedmineSaml
 
           options = { matches_request_id: transaction_id }
           if saml_redirect_binding_request?
-            query_options = saml_redirect_query_options
+            query_options = RedmineSaml::RedirectBinding.query_options request
             return reject_logout_response 'duplicate SAML query parameter' if query_options.blank?
 
             options.merge! query_options
@@ -338,33 +340,6 @@ module RedmineSaml
 
         def saml_post_binding_request?
           request.request_method == 'POST'
-        end
-
-        def saml_query_parameters
-          request.query_parameters.to_h.dup
-        end
-
-        def saml_redirect_query_options
-          raw_parameters = {}
-          parameter_counts = Hash.new 0
-
-          request.query_string.to_s.split('&').each do |query_component|
-            encoded_name, encoded_value = query_component.split '=', 2
-            name = Rack::Utils.unescape encoded_name.to_s
-            next unless SAML_REDIRECT_QUERY_PARAMETERS.include? name
-
-            parameter_counts[name] += 1
-            raw_parameters[name] = encoded_value.to_s
-          end
-
-          return if parameter_counts.any? { |_name, count| count > 1 }
-
-          {
-            get_params: {
-              'Signature' => saml_query_parameters['Signature']
-            },
-            raw_get_params: raw_parameters.slice(*SAML_REDIRECT_RAW_PARAMETERS)
-          }
         end
 
         def valid_saml_message_size?(message, settings)
