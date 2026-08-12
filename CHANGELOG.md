@@ -29,6 +29,9 @@ This file records notable user-facing changes to the maintained `nrswnrsw/redmin
 - Aligned successful SAML callbacks with Redmine's standard active-user authentication lifecycle, including Sudo Mode timestamp updates, while preserving SAML session data needed for logout.
 - SAML callbacks now use Redmine's inactive-user handling semantics and refuse locked or pending users without creating an authenticated session.
 - SP-initiated SLO now ends the Redmine local session before redirecting to the IdP. A later IdP or LogoutResponse failure does not undo the local logout.
+- Cross-site HTTP-POST SLO now works when the main Redmine `SameSite=Lax` session cookie is not sent, using dedicated encrypted `SameSite=None; Secure` context cookies bound to a short-lived one-time SLO transaction Token for SP-initiated responses and to the exact Redmine session Token for IdP-initiated requests.
+- The existing session-based SLO path remains primary; the dedicated cookie and Token path is only a fallback for cross-site HTTP-POST messages.
+- Existing HTTP deployments and HTTP-Redirect Binding keep their prior session-based behavior; the dedicated cross-site POST fallback is HTTPS-only. Existing initializer behavior remains compatible.
 - Preserved legacy attribute mapping behavior with explicit regression coverage. See the README for existing-user persistence and `on_login` hook details.
 - Updated the README, sample initializer, repository metadata, support matrix, installation instructions, and SAML/SLO configuration guidance for the maintained repository.
 
@@ -47,7 +50,7 @@ This file records notable user-facing changes to the maintained `nrswnrsw/redmin
 ### Fixed
 
 - Added Redmine 7 and Rails 8.1 compatibility, including explicit external redirects only to administrator-configured IdP SSO/SLO endpoints.
-- Corrected `replace_redmine_login` so the SAML login start route redirects to the configured IdP instead of returning a 404 response.
+- Corrected `replace_redmine_login` to use a CSRF-protected POST bridge through the OmniAuth request phase instead of redirecting directly to the IdP, producing a standard SP-initiated AuthnRequest. The configured IdP SSO URL must accept SP-initiated AuthnRequests.
 - Fixed the plugin settings screen so it renders and saves correctly without Additionals.
 - Corrected IdP LogoutResponse URL query separators when `idp_slo_response_service_url` and `idp_slo_service_url` differ in whether they contain a query string. The workaround uses a request-local ruby-saml Settings copy and does not modify global settings or monkey-patch ruby-saml.
 - Preserved IdP-specific raw percent encoding, including ADFS-compatible encoding differences, when validating HTTP-Redirect LogoutRequest and LogoutResponse signatures.

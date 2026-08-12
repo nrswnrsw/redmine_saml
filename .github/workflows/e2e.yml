@@ -3,6 +3,7 @@ name: SAML E2E
 on:
   push:
     branches:
+      - main
       - redmine-7-support
     paths:
       - '.github/workflows/e2e.yml'

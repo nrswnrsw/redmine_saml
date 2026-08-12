@@ -75,6 +75,10 @@ Copy and edit the [sample initializer](contrib/sample_saml_initializers.rb). The
 
 For the complete set of lower-level OmniAuth SAML options, see the [omniauth-saml options documentation](https://github.com/omniauth/omniauth-saml#options).
 
+When `replace_redmine_login` is enabled, login still uses OmniAuth's standard SP-initiated request phase and generates a SAML AuthnRequest through a CSRF-protected POST bridge. `idp_sso_service_url` must therefore be a normal SAML SSO endpoint that accepts SP-initiated AuthnRequests. No new setting key or initializer schema change is required.
+
+Legacy configurations that specify an IdP-initiated-only URL should verify this endpoint. For example, Keycloak's `/protocol/saml/clients/<client>` URL is an IdP-initiated deep link; use the standard `/protocol/saml` endpoint for SP-initiated requests instead.
+
 ### Attribute mapping and existing users
 
 These four mappings are required:
