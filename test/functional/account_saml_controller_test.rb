@@ -19,13 +19,13 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
   tests AccountController
 
   setup do
-    @saved_saml_configuration = RedmineSaml.configured_saml.deep_dup
+    save_saml_configuration
     prepare_tests
     configure_slo_test
   end
 
   teardown do
-    RedmineSaml.configured_saml.replace @saved_saml_configuration
+    restore_saml_configuration
   end
 
   context 'GET /login SAML button' do
@@ -282,7 +282,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     end
 
     should 'locally log out before redirecting to SAML logout on the Redmine POST logout' do
-      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      enable_sp_initiated_slo
       RedmineSaml.configured_saml[:idp_slo_service_url] = 'https://saml.server/ls/?wa=wsignout1'
       establish_saml_session
       Rails.logger.expects(:error).with('IdP initiated LogoutRequest was not valid!').never
@@ -311,7 +311,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     end
 
     should 'locally log out when the SP LogoutRequest cannot be generated' do
-      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      enable_sp_initiated_slo
       RedmineSaml.configured_saml[:idp_slo_service_url] = nil
       establish_saml_session
       Rails.logger.expects(:error).with('IdP initiated LogoutRequest was not valid!').never
@@ -349,7 +349,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       assert_response :success
       assert_select 'form#saml-request-form[method="post"][action="/auth/saml"]'
 
-      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      enable_sp_initiated_slo
       establish_saml_session
       post :logout
 
@@ -366,7 +366,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       assert_response :success
       assert_select 'form#saml-request-form[method="post"][action="/auth/saml"]'
 
-      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      enable_sp_initiated_slo
       establish_saml_session
       post :logout
 
@@ -376,7 +376,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
 
     should 'keep the local logout when a fingerprint-only Redirect LogoutResponse is rejected' do
       configure_fingerprint_only_slo
-      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      enable_sp_initiated_slo
       establish_saml_session
       expected_login = User.current.login
       info_logs = capture_info_logs
@@ -736,7 +736,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     end
 
     should 'validate a pending SP LogoutResponse after the local session was already deleted' do
-      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      enable_sp_initiated_slo
       expected_login = User.current.login
       delete_session_log = "Delete session for '#{expected_login}'"
       info_logs = capture_info_logs
@@ -965,7 +965,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     end
 
     should 'process a POST LogoutResponse from the dedicated pending cookie without the main session' do
-      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      enable_sp_initiated_slo
       expected_login = User.current.login
       info_logs = capture_info_logs
 
@@ -1001,7 +1001,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     end
 
     should 'keep the session based SP response path primary without a dedicated cookie' do
-      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      enable_sp_initiated_slo
       request.env.delete 'HTTPS'
       request.env['rack.url_scheme'] = 'http'
 
@@ -1021,7 +1021,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     end
 
     should 'keep the session based SP response path primary with a tampered dedicated cookie' do
-      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      enable_sp_initiated_slo
 
       post :logout
       transaction_id = session[:transaction_id]
@@ -1042,7 +1042,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     end
 
     should 'ignore the fallback Token TTL when the main pending session is present' do
-      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      enable_sp_initiated_slo
       request.env.delete 'HTTPS'
       request.env['rack.url_scheme'] = 'http'
 
@@ -1062,7 +1062,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     end
 
     should 'require the fallback Token TTL when the main pending session is absent' do
-      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      enable_sp_initiated_slo
       post :logout
       transaction_id = session[:transaction_id]
       pending_context = session[:saml_logout_context].deep_dup
@@ -1082,7 +1082,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     end
 
     should 'reject conflicting session and dedicated pending contexts without consuming the Token' do
-      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      enable_sp_initiated_slo
       post :logout
       transaction_id = session[:transaction_id]
       token_id = session[:saml_logout_context]['token_id']
@@ -1363,6 +1363,11 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       true
     end
     messages
+  end
+
+  # sp_logout_request gates SP initiated SLO on the presence of signout_url.
+  def enable_sp_initiated_slo
+    RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
   end
 
   def configure_slo_test
@@ -1732,13 +1737,5 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     assert_nil session[:user_id]
     assert_not session[:logged_in_with_saml]
     assert_equal User.anonymous, User.current
-  end
-
-  def with_forgery_protection
-    original = ActionController::Base.allow_forgery_protection
-    ActionController::Base.allow_forgery_protection = true
-    yield
-  ensure
-    ActionController::Base.allow_forgery_protection = original
   end
 end

@@ -36,6 +36,25 @@ module RedmineSaml
       Setting.plugin_redmine_saml = @saved_settings
       remove_instance_variable :@saved_settings
     end
+
+    # The initializer SAML configuration is a different thing from the Redmine
+    # plugin settings handled by change_saml_settings / restore_saml_settings,
+    # so tests that change it save and restore it from their own setup/teardown.
+    def save_saml_configuration
+      @saved_saml_configuration = RedmineSaml.configured_saml.deep_dup
+    end
+
+    def restore_saml_configuration
+      RedmineSaml.configured_saml.replace @saved_saml_configuration
+    end
+
+    def with_forgery_protection
+      original_forgery_protection = ActionController::Base.allow_forgery_protection
+      ActionController::Base.allow_forgery_protection = true
+      yield
+    ensure
+      ActionController::Base.allow_forgery_protection = original_forgery_protection
+    end
   end
 
   class ControllerTest < Redmine::ControllerTest

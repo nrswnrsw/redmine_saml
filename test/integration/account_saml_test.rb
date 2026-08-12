@@ -416,14 +416,6 @@ class AccountSAMLTest < Redmine::IntegrationTest
     OmniAuth.config.before_request_phase = original_before_request_phase
   end
 
-  def with_forgery_protection
-    original_forgery_protection = ActionController::Base.allow_forgery_protection
-    ActionController::Base.allow_forgery_protection = true
-    yield
-  ensure
-    ActionController::Base.allow_forgery_protection = original_forgery_protection
-  end
-
   def load_saml_request_bridge(origin)
     get '/login', params: { back_url: origin }
     assert_response :redirect

@@ -8,14 +8,14 @@ class SamlSettingsControllerTest < RedmineSaml::ControllerTest
   tests SettingsController
 
   setup do
-    @saved_saml_configuration = RedmineSaml.configured_saml.deep_dup
+    save_saml_configuration
     User.current = nil
     prepare_tests
     @request.session[:user_id] = 1
   end
 
   teardown do
-    RedmineSaml.configured_saml.replace @saved_saml_configuration
+    restore_saml_configuration
   end
 
   context 'GET plugin settings' do
