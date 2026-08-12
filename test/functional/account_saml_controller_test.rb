@@ -857,6 +857,406 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
     end
   end
 
+  context 'SameSite cross-site POST SLO fallback' do
+    setup do
+      establish_saml_session
+      use_https
+    end
+
+    should 'issue an encrypted active context after SAML login with scoped secure cookie attributes' do
+      original_relative_url_root = Rails.application.config.relative_url_root
+      Rails.application.config.relative_url_root = '/redmine'
+      session.clear
+      User.current = User.anonymous
+      session['saml_uid'] = users(:users_001).mail
+      session['saml_session_index'] = '_current-session-index'
+      request.env['omniauth.auth'] = { 'saml_login' => 'admin' }
+
+      get :login_with_saml_callback, params: { provider: 'saml' }
+
+      set_cookie = set_cookie_header_for RedmineSaml::SloCookie::ACTIVE_NAME
+      assert set_cookie
+      assert_includes set_cookie, RedmineSaml::SloCookie::ACTIVE_NAME
+      assert_match(/path=\/redmine\/auth\/saml\/sls/i, set_cookie)
+      assert_match(/secure/i, set_cookie)
+      assert_match(/httponly/i, set_cookie)
+      assert_match(/samesite=none/i, set_cookie)
+      assert_no_match(/domain=/i, set_cookie)
+      assert_not_includes set_cookie, session[:tk]
+      assert_operator set_cookie.bytesize, :<, 4096
+    ensure
+      Rails.application.config.relative_url_root = original_relative_url_root
+    end
+
+    should 'not issue a dedicated active cookie over HTTP' do
+      request.env.delete 'HTTPS'
+      request.env['rack.url_scheme'] = 'http'
+      session.clear
+      User.current = User.anonymous
+      session['saml_uid'] = users(:users_001).mail
+      session['saml_session_index'] = '_current-session-index'
+      request.env['omniauth.auth'] = { 'saml_login' => 'admin' }
+
+      get :login_with_saml_callback, params: { provider: 'saml' }
+
+      assert_not_includes response.headers['Set-Cookie'].to_s, RedmineSaml::SloCookie::ACTIVE_NAME
+    end
+
+    should 'not accept the dedicated fallback cookie over HTTP' do
+      target_token = current_session_token
+      write_active_slo_cookie active_context(target_token)
+      remove_main_saml_session
+      request.env.delete 'HTTPS'
+      request.env['rack.url_scheme'] = 'http'
+
+      post :redirect_after_saml_logout,
+           params: signed_logout_request_params(binding: :post, session_index: '_current-session-index')
+
+      assert_response :bad_request
+      assert Token.exists?(target_token.id)
+    end
+
+    should 'process a POST LogoutResponse from the dedicated pending cookie without the main session' do
+      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      expected_login = User.current.login
+      info_logs = capture_info_logs
+
+      post :logout
+      transaction_id = session[:transaction_id]
+      pending_context = session[:saml_logout_context].deep_dup
+      token_id = pending_context['token_id']
+      set_cookie = set_cookie_header_for RedmineSaml::SloCookie::PENDING_NAME
+      assert set_cookie
+      assert_includes set_cookie, RedmineSaml::SloCookie::PENDING_NAME
+      assert_match(/expires=/i, set_cookie)
+      assert_not_includes set_cookie, Token.find(token_id).value
+      assert_not_includes info_logs, "Delete session for '#{expected_login}'"
+
+      remove_main_saml_session
+      use_https
+      post :redirect_after_saml_logout,
+           params: signed_logout_response_params(request_id: transaction_id, binding: :post)
+
+      assert_redirected_to home_path
+      assert_not Token.exists?(token_id)
+      assert_equal ["Delete session for '#{expected_login}'"], info_logs.grep(/\ADelete session for /)
+      assert_saml_session_deleted
+      assert_nil read_pending_slo_cookie
+
+      write_pending_slo_cookie pending_context
+      use_https
+      post :redirect_after_saml_logout,
+           params: signed_logout_response_params(request_id: transaction_id, binding: :post)
+
+      assert_response :bad_request
+      assert_equal ["Delete session for '#{expected_login}'"], info_logs.grep(/\ADelete session for /)
+    end
+
+    should 'keep the session based SP response path primary without a dedicated cookie' do
+      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      request.env.delete 'HTTPS'
+      request.env['rack.url_scheme'] = 'http'
+
+      post :logout
+      transaction_id = session[:transaction_id]
+      token_id = session[:saml_logout_context]['token_id']
+      assert_nil read_pending_slo_cookie
+      Token.find(token_id).destroy!
+      session.delete :saml_logout_context
+
+      post :redirect_after_saml_logout,
+           params: signed_logout_response_params(request_id: transaction_id, binding: :post)
+
+      assert_redirected_to home_path
+      assert_not Token.exists?(token_id)
+      assert_saml_session_deleted
+    end
+
+    should 'keep the session based SP response path primary with a tampered dedicated cookie' do
+      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+
+      post :logout
+      transaction_id = session[:transaction_id]
+      assert transaction_id
+      assert session[:saml_logout_pending]
+      assert_equal users(:users_001).login, session[:saml_logout_login]
+      cookies[RedmineSaml::SloCookie::PENDING_NAME] = 'tampered-cookie'
+
+      use_https
+      post :redirect_after_saml_logout,
+           params: signed_logout_response_params(request_id: transaction_id, binding: :post)
+
+      assert_redirected_to home_path
+      assert_saml_session_deleted
+      assert_nil session[:transaction_id]
+      assert_nil session[:saml_logout_pending]
+      assert_nil session[:saml_logout_login]
+    end
+
+    should 'ignore the fallback Token TTL when the main pending session is present' do
+      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      request.env.delete 'HTTPS'
+      request.env['rack.url_scheme'] = 'http'
+
+      post :logout
+      transaction_id = session[:transaction_id]
+      token = Token.find session[:saml_logout_context]['token_id']
+      token.update_column :created_on, 6.minutes.ago
+      token.reload
+      session[:saml_logout_context]['token_created_at'] = token.created_on.to_i
+
+      post :redirect_after_saml_logout,
+           params: signed_logout_response_params(request_id: transaction_id, binding: :post)
+
+      assert_redirected_to home_path
+      assert_not Token.exists?(token.id)
+      assert_saml_session_deleted
+    end
+
+    should 'require the fallback Token TTL when the main pending session is absent' do
+      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      post :logout
+      transaction_id = session[:transaction_id]
+      pending_context = session[:saml_logout_context].deep_dup
+      token = Token.find pending_context['token_id']
+      token.update_column :created_on, 6.minutes.ago
+      token.reload
+      write_pending_slo_cookie pending_context.merge('token_created_at' => token.created_on.to_i)
+      remove_main_saml_session
+
+      use_https
+      post :redirect_after_saml_logout,
+           params: signed_logout_response_params(request_id: transaction_id, binding: :post)
+
+      assert_response :bad_request
+      assert Token.exists?(token.id)
+      assert_saml_session_deleted
+    end
+
+    should 'reject conflicting session and dedicated pending contexts without consuming the Token' do
+      RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
+      post :logout
+      transaction_id = session[:transaction_id]
+      token_id = session[:saml_logout_context]['token_id']
+      session[:saml_logout_context] = session[:saml_logout_context].merge('transaction_id' => '_conflicting-id')
+
+      use_https
+      post :redirect_after_saml_logout,
+           params: signed_logout_response_params(request_id: transaction_id, binding: :post)
+
+      assert_response :bad_request
+      assert Token.exists?(token_id)
+      assert session[:saml_logout_pending]
+    end
+
+    should 'process a POST LogoutRequest from the active cookie and delete only its exact session Token' do
+      original_verify_sessions = Rails.application.config.redmine_verify_sessions
+      Rails.application.config.redmine_verify_sessions = false
+      autologin_name = @controller.send :autologin_cookie_name
+      autologin_path = Redmine::Configuration['autologin_cookie_path'] ||
+                       RedmineApp::Application.config.relative_url_root || '/'
+      target_token = current_session_token
+      other_value = users(:users_001).generate_session_token
+      other_token = RedmineSaml::SloTokenStore.session_token user_id: users(:users_001).id, value: other_value
+      write_active_slo_cookie active_context(target_token)
+      remove_main_saml_session
+      assert_nil cookies[autologin_name]
+
+      use_https
+      post :redirect_after_saml_logout,
+           params: signed_logout_request_params(
+             binding: :post,
+             session_index: '_current-session-index'
+           )
+
+      assert_response :redirect
+      assert_not Token.exists?(target_token.id)
+      assert Token.exists?(other_token.id)
+      assert_saml_session_deleted
+      assert_nil read_active_slo_cookie
+      set_cookie = response.headers['Set-Cookie'].to_s
+      assert_includes set_cookie, Rails.application.config.session_options[:key]
+      autologin_cookie = set_cookie_header_for autologin_name
+      assert autologin_cookie
+      assert_match(/\A#{Regexp.escape autologin_name}=;/, autologin_cookie)
+      assert_match(/expires=/i, autologin_cookie)
+      assert_match(/path=#{Regexp.escape autologin_path}/i, autologin_cookie)
+    ensure
+      Rails.application.config.redmine_verify_sessions = original_verify_sessions
+    end
+
+    should 'accept a fallback LogoutRequest without SessionIndex as legacy behavior' do
+      target_token = current_session_token
+      context = RedmineSaml::SloContext.active(
+        user_id: users(:users_001).id,
+        token: target_token,
+        name_id: users(:users_001).mail,
+        session_index: nil,
+        settings: RedmineSaml.configured_saml
+      )
+      write_active_slo_cookie context
+      remove_main_saml_session
+
+      use_https
+      post :redirect_after_saml_logout,
+           params: signed_logout_request_params(binding: :post, session_index: nil)
+
+      assert_response :redirect
+      assert_not Token.exists?(target_token.id)
+    end
+
+    should 'keep the existing active session path primary when no dedicated cookie exists' do
+      target_token = current_session_token
+      delete_slo_cookies
+
+      post :redirect_after_saml_logout,
+           params: signed_logout_request_params(
+             binding: :post,
+             session_index: session['saml_session_index']
+           )
+
+      assert_response :redirect
+      assert_not Token.exists?(target_token.id)
+      assert_saml_session_deleted
+    end
+
+    should 'not use a stale active context against a current non-SAML session' do
+      target_token = current_session_token
+      write_active_slo_cookie active_context(target_token)
+      current_value = users(:users_001).generate_session_token
+      current_token = RedmineSaml::SloTokenStore.session_token user_id: users(:users_001).id, value: current_value
+      session.clear
+      session[:user_id] = users(:users_001).id
+      session[:tk] = current_value
+      User.current = users(:users_001)
+
+      use_https
+      post :redirect_after_saml_logout,
+           params: signed_logout_request_params(binding: :post, session_index: '_current-session-index')
+
+      assert_response :bad_request
+      assert Token.exists?(target_token.id)
+      assert Token.exists?(current_token.id)
+      assert_equal users(:users_001).id, session[:user_id]
+    end
+
+    should 'expire both dedicated contexts on local logout even when they are absent from the request' do
+      original_relative_url_root = Rails.application.config.relative_url_root
+      Rails.application.config.relative_url_root = '/redmine'
+      assert_nil cookies[RedmineSaml::SloCookie::ACTIVE_NAME]
+      assert_nil cookies[RedmineSaml::SloCookie::PENDING_NAME]
+      session.delete :logged_in_with_saml
+
+      post :logout
+
+      assert_response :redirect
+      [RedmineSaml::SloCookie::ACTIVE_NAME, RedmineSaml::SloCookie::PENDING_NAME].each do |name|
+        deletion_cookie = set_cookie_header_for name
+        assert deletion_cookie
+        assert_match(/\A#{Regexp.escape name}=;/, deletion_cookie)
+        assert_match(/expires=/i, deletion_cookie)
+        assert_match(/path=\/redmine\/auth\/saml\/sls/i, deletion_cookie)
+      end
+      assert_saml_session_deleted
+    ensure
+      Rails.application.config.relative_url_root = original_relative_url_root
+    end
+
+    should 'keep the exact session Token when the active cookie is tampered with' do
+      target_token = current_session_token
+      cookies[RedmineSaml::SloCookie::ACTIVE_NAME] = 'tampered-cookie'
+      remove_main_saml_session
+
+      use_https
+      post :redirect_after_saml_logout,
+           params: signed_logout_request_params(binding: :post, session_index: '_current-session-index')
+
+      assert_response :bad_request
+      assert Token.exists?(target_token.id)
+    end
+
+    should 'keep the exact session Token for a stale or mismatched active context' do
+      target_token = current_session_token
+      context = active_context(target_token)
+      write_active_slo_cookie context.merge('token_verifier' => '0' * 64)
+      remove_main_saml_session
+
+      use_https
+      post :redirect_after_saml_logout,
+           params: signed_logout_request_params(binding: :post, session_index: '_current-session-index')
+
+      assert_response :bad_request
+      assert Token.exists?(target_token.id)
+    end
+
+    should 'reject an active context whose exact session Token is stale' do
+      target_token = current_session_token
+      write_active_slo_cookie active_context(target_token)
+      target_token.delete
+      remove_main_saml_session
+
+      use_https
+      post :redirect_after_saml_logout,
+           params: signed_logout_request_params(binding: :post, session_index: '_current-session-index')
+
+      assert_response :bad_request
+    end
+
+    should 'keep the exact session Token when the fallback NameID or SessionIndex does not match' do
+      target_token = current_session_token
+      write_active_slo_cookie active_context(target_token)
+      remove_main_saml_session
+
+      use_https
+      post :redirect_after_saml_logout,
+           params: signed_logout_request_params(
+             binding: :post,
+             name_id: 'another-user@example.test',
+             session_index: '_current-session-index'
+           )
+      assert_response :bad_request
+      assert Token.exists?(target_token.id)
+
+      write_active_slo_cookie active_context(target_token)
+      use_https
+      post :redirect_after_saml_logout,
+           params: signed_logout_request_params(
+             binding: :post,
+             session_index: '_another-session-index'
+           )
+      assert_response :bad_request
+      assert Token.exists?(target_token.id)
+    end
+
+    should 'keep the exact session Token when LogoutResponse generation fails' do
+      target_token = current_session_token
+      write_active_slo_cookie active_context(target_token)
+      remove_main_saml_session
+      OneLogin::RubySaml::SloLogoutresponse.any_instance.expects(:create).raises StandardError
+
+      use_https
+      post :redirect_after_saml_logout,
+           params: signed_logout_request_params(binding: :post, session_index: '_current-session-index')
+
+      assert_response :bad_request
+      assert Token.exists?(target_token.id)
+    end
+
+    should 'keep the exact session Token when the fallback signature is invalid' do
+      target_token = current_session_token
+      write_active_slo_cookie active_context(target_token)
+      remove_main_saml_session
+      logout_params = signed_logout_request_params binding: :post, session_index: '_current-session-index'
+      logout_params['SAMLRequest'] = Base64.strict_encode64 '<invalid/>'
+
+      use_https
+      post :redirect_after_saml_logout, params: logout_params
+
+      assert_response :bad_request
+      assert Token.exists?(target_token.id)
+    end
+  end
+
   class << self
     def slo_test_private_key
       @slo_test_private_key ||= OpenSSL::PKey::RSA.new 2048
@@ -1173,10 +1573,81 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
   def establish_saml_session
     user = users :users_001
     session[:user_id] = user.id
+    session[:tk] = user.generate_session_token
     session[:logged_in_with_saml] = true
     session['saml_uid'] = user.mail
     session['saml_session_index'] = '_current-session-index'
     User.current = user
+  end
+
+  def use_https
+    request.env['HTTPS'] = 'on'
+    request.env['rack.url_scheme'] = 'https'
+  end
+
+  def remove_main_saml_session
+    session.clear
+    User.current = User.anonymous
+  end
+
+  def current_session_token
+    RedmineSaml::SloTokenStore.session_token user_id: session[:user_id], value: session[:tk]
+  end
+
+  def active_context(token)
+    RedmineSaml::SloContext.active(
+      user_id: users(:users_001).id,
+      token: token,
+      name_id: users(:users_001).mail,
+      session_index: '_current-session-index',
+      settings: RedmineSaml.configured_saml
+    )
+  end
+
+  def write_active_slo_cookie(context)
+    write_slo_cookie RedmineSaml::SloCookie::ACTIVE_NAME, context
+  end
+
+  def write_pending_slo_cookie(context)
+    write_slo_cookie RedmineSaml::SloCookie::PENDING_NAME, context
+  end
+
+  def write_slo_cookie(name, context)
+    cookies.encrypted[name] = {
+      value: RedmineSaml::SloContext.dump(context),
+      path: @controller.send(:slo_cookie).path,
+      secure: true,
+      httponly: true,
+      same_site: :none
+    }
+  end
+
+  def read_active_slo_cookie
+    read_slo_cookie RedmineSaml::SloCookie::ACTIVE_NAME, :load_active
+  end
+
+  def read_pending_slo_cookie
+    read_slo_cookie RedmineSaml::SloCookie::PENDING_NAME, :load_pending
+  end
+
+  def read_slo_cookie(name, loader)
+    serialized = cookies.encrypted[name]
+    return if serialized.blank?
+
+    RedmineSaml::SloContext.public_send(
+      loader,
+      serialized,
+      settings: RedmineSaml.configured_saml
+    )
+  end
+
+  def delete_slo_cookies
+    @controller.send :clear_slo_cookies
+  end
+
+  def set_cookie_header_for(name)
+    headers = Array.wrap(response.headers['Set-Cookie']).flat_map { |header| header.to_s.split "\n" }
+    headers.find { |header| header.start_with? "#{name}=" }
   end
 
   def assert_saml_session_active

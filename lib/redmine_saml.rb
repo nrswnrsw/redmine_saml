@@ -1,5 +1,9 @@
 # frozen_string_literal: true
 
+require_relative 'redmine_saml/slo_context'
+require_relative 'redmine_saml/slo_token_store'
+require_relative 'redmine_saml/slo_cookie'
+
 module RedmineSaml
   VERSION = '1.1.0'
 
@@ -51,6 +55,8 @@ module RedmineSaml
 
       # Apply patches and helper
       loader.apply!
+
+      SloTokenStore.register_action!
 
       # Load view hooks
       loader.load_view_hooks!

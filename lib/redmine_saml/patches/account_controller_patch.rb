@@ -26,7 +26,9 @@ module RedmineSaml
           if RedmineSaml.enabled? && RedmineSaml.replace_redmine_login?
             redirect_to login_with_saml_redirect_path(provider: 'saml', origin: back_url)
           else
-            super
+            result = super
+            clear_slo_cookies if saml_post_binding_request? && User.current.logged? && !session[:logged_in_with_saml]
+            result
           end
         end
 
@@ -71,6 +73,7 @@ module RedmineSaml
             session[:logged_in_with_saml] = true
             session['saml_uid'] = saml_uid if saml_uid.present?
             session['saml_session_index'] = saml_session_index if saml_session_index.present?
+            issue_active_slo_context
           end
         end
 
@@ -90,14 +93,18 @@ module RedmineSaml
           if RedmineSaml.enabled? && session[:logged_in_with_saml] && saml_post_binding_request?
             sp_logout_request
           else
-            super
+            result = super
+            clear_slo_cookies if saml_post_binding_request?
+            result
           end
         end
 
         # Method to handle IdP initiated logouts
         def idp_logout_request
           validation_complete = false
-          return reject_saml_logout 'no active SAML session' unless active_saml_logout_session?
+          active_session = active_saml_logout_session?
+          context_available = active_session || saml_post_binding_request?
+          return reject_saml_logout 'no active SAML session' unless context_available
           return reject_idp_logout_request 'missing SAML signature' unless valid_saml_signature_parameters?
 
           settings = OneLogin::RubySaml::Settings.new omniauth_saml_settings
@@ -114,10 +121,25 @@ module RedmineSaml
 
           valid = logout_request.is_valid? &&
                   valid_post_saml_signature?(logout_request.document, settings) &&
-                  valid_saml_message_context?(logout_request, settings) &&
-                  valid_saml_name_id?(logout_request.name_id) &&
-                  valid_saml_session_index?(logout_request.session_indexes)
+                  valid_saml_message_context?(logout_request, settings)
           return reject_idp_logout_request 'invalid LogoutRequest' unless valid
+
+          fallback_context = nil
+          fallback_session_token = nil
+          if active_session
+            valid = valid_saml_name_id?(logout_request.name_id) &&
+                    valid_saml_session_index?(logout_request.session_indexes)
+          else
+            return reject_idp_logout_request 'non-SAML session is active' if User.current.logged?
+
+            fallback_context = active_slo_context
+            valid = fallback_context.present? &&
+                    RedmineSaml::SloContext.matching_name_id?(fallback_context, logout_request.name_id) &&
+                    RedmineSaml::SloContext.matching_session_indexes?(fallback_context, logout_request.session_indexes)
+            fallback_session_token = RedmineSaml::SloTokenStore.valid_session(fallback_context) if valid
+            valid &&= fallback_session_token.present?
+          end
+          return reject_idp_logout_request 'invalid SAML logout context' unless valid
 
           validation_complete = true
           logger.info "IdP initiated Logout for #{logout_request.name_id}"
@@ -131,8 +153,22 @@ module RedmineSaml
                                                                              RelayState: params[:RelayState]
 
           # Actually log out this session only after validation and response generation succeed.
-          redirect_to logout_response, allow_other_host: true
-          saml_logout_user
+          if active_session
+            redirect_to logout_response, allow_other_host: true
+            saml_logout_user
+            clear_redmine_autologin_cookie
+          else
+            session_consumed = RedmineSaml::SloTokenStore.consume_session(
+              fallback_context,
+              fallback_session_token
+            )
+            return reject_saml_logout 'stale SAML session context' unless session_consumed
+
+            reset_session
+            clear_slo_cookies
+            clear_redmine_autologin_cookie
+            redirect_to logout_response, allow_other_host: true
+          end
         rescue StandardError => e
           reason = "LogoutRequest validation raised #{e.class}"
           if validation_complete
@@ -146,14 +182,17 @@ module RedmineSaml
         # the LogoutResponse, then finish the already-local logout transaction.
         def process_logout_response
           validation_complete = false
-          return reject_saml_logout 'no active or pending SAML logout' unless valid_saml_logout_response_session?
-          return reject_logout_response 'missing SAML transaction ID' if session[:transaction_id].blank?
+          context_resolution = resolve_saml_logout_response_context
+          return reject_saml_logout context_resolution[:error] if context_resolution[:error]
+
+          transaction_id = context_resolution[:transaction_id]
+          return reject_logout_response 'missing SAML transaction ID' if transaction_id.blank?
           return reject_logout_response 'missing SAML signature' unless valid_saml_signature_parameters?
 
           settings = OneLogin::RubySaml::Settings.new omniauth_saml_settings
           return reject_logout_response 'SAML message is too large' unless valid_saml_message_size? params[:SAMLResponse], settings
 
-          options = { matches_request_id: session[:transaction_id] }
+          options = { matches_request_id: transaction_id }
           if saml_redirect_binding_request?
             query_options = saml_redirect_query_options
             return reject_logout_response 'duplicate SAML query parameter' if query_options.blank?
@@ -175,9 +214,17 @@ module RedmineSaml
                   valid_saml_message_context?(logout_response, settings)
           return reject_logout_response 'invalid LogoutResponse' unless valid
 
+          context = context_resolution[:context]
+          if context_resolution[:fallback]
+            transaction_consumed = RedmineSaml::SloTokenStore.consume_transaction context
+            return reject_logout_response 'stale SAML logout transaction' unless transaction_consumed
+          else
+            RedmineSaml::SloTokenStore.cleanup_transaction context_resolution[:cleanup_context]
+          end
+
           validation_complete = true
-          active_session = active_saml_logout_session?
-          logout_login = active_session ? User.current.login : session[:saml_logout_login]
+          active_session = context_resolution[:active_session]
+          logout_login = context_resolution[:login]
           logger.info "Delete session for '#{logout_login}'" if logout_login.present?
           if active_session
             saml_logout_user
@@ -198,6 +245,7 @@ module RedmineSaml
         def sp_logout_request
           # LogoutRequest accepts plain browser requests w/o parameters
           settings = omniauth_saml_settings.dup
+          transaction_token = nil
 
           if settings[:signout_url]
             # Since we created a new SAML request, save the transaction_id
@@ -212,10 +260,20 @@ module RedmineSaml
 
             logout_url = logout_request.create(OneLogin::RubySaml::Settings.new(settings),
                                                RelayState: home_url)
+            transaction_token = RedmineSaml::SloTokenStore.create_transaction User.current
+            pending_context = RedmineSaml::SloContext.pending(
+              transaction_id: transaction_id,
+              user_id: User.current.id,
+              token: transaction_token,
+              login: logout_login,
+              settings: settings
+            )
             saml_logout_user
             session[:transaction_id] = transaction_id
             session[:saml_logout_pending] = true
             session[:saml_logout_login] = logout_login
+            session[:saml_logout_context] = pending_context
+            slo_cookie.write_pending pending_context
             redirect_to logout_url, allow_other_host: true
           else
             logger.info 'SLO IdP Endpoint not found in settings, executing then a normal logout'
@@ -223,6 +281,7 @@ module RedmineSaml
             redirect_to home_path
           end
         rescue StandardError => e
+          RedmineSaml::SloTokenStore.destroy_transaction transaction_token
           logger.warn "SP initiated SAML logout failed: #{e.class}"
           saml_logout_user
           redirect_to home_path
@@ -260,10 +319,6 @@ module RedmineSaml
 
         def active_saml_logout_session?
           RedmineSaml.enabled? && session[:logged_in_with_saml] && User.current.logged?
-        end
-
-        def valid_saml_logout_response_session?
-          active_saml_logout_session? || (session[:saml_logout_pending] && User.current.anonymous?)
         end
 
         def valid_saml_signature_parameters?
@@ -428,11 +483,125 @@ module RedmineSaml
           session.delete :transaction_id
           session.delete :saml_logout_pending
           session.delete :saml_logout_login
+          session.delete :saml_logout_context
+          slo_cookie.delete_pending
         end
 
         def saml_logout_user
           logout_user
           reset_session
+          clear_slo_cookies
+        end
+
+        def issue_active_slo_context
+          return if session['saml_uid'].blank?
+
+          token = RedmineSaml::SloTokenStore.session_token user_id: session[:user_id], value: session[:tk]
+          return unless token
+
+          context = RedmineSaml::SloContext.active(
+            user_id: session[:user_id],
+            token: token,
+            name_id: session['saml_uid'],
+            session_index: session['saml_session_index'],
+            settings: omniauth_saml_settings
+          )
+          slo_cookie.write_active context
+        end
+
+        def active_slo_context
+          return unless saml_post_binding_request?
+          return unless slo_cookie.active_present?
+
+          RedmineSaml::SloContext.load_active slo_cookie.read_active, settings: omniauth_saml_settings
+        end
+
+        def resolve_saml_logout_response_context
+          active_session = active_saml_logout_session?
+          pending_session = session[:saml_logout_pending] && User.current.anonymous?
+          context_available = active_session || pending_session || saml_post_binding_request?
+          return { error: 'no active or pending SAML logout' } unless context_available
+
+          if active_session
+            return {
+              active_session: true,
+              transaction_id: session[:transaction_id],
+              login: User.current.login
+            }
+          end
+
+          session_context = pending_session && RedmineSaml::SloContext.load_pending(
+            session[:saml_logout_context],
+            settings: omniauth_saml_settings,
+            enforce_expiration: false
+          )
+          cookie_present = slo_cookie.pending_present?
+          cookie_context = if cookie_present
+                             RedmineSaml::SloContext.load_pending(
+                               slo_cookie.read_pending,
+                               settings: omniauth_saml_settings
+                             )
+                           end
+
+          if pending_session
+            valid_cookie_context = cookie_context if RedmineSaml::SloTokenStore.valid_transaction(cookie_context)
+            if valid_cookie_context
+              return { error: 'conflicting SAML logout context' } unless legacy_pending_matches_cookie? valid_cookie_context
+              if session_context && !RedmineSaml::SloContext.matching_pending_contexts?(session_context, valid_cookie_context)
+                return { error: 'conflicting SAML logout context' }
+              end
+            end
+
+            return {
+              active_session: false,
+              transaction_id: session[:transaction_id],
+              login: session[:saml_logout_login],
+              cleanup_context: session_context || valid_cookie_context
+            }
+          end
+
+          return { error: 'invalid SAML logout cookie' } if cookie_present && cookie_context.blank?
+          return { error: 'no pending SAML logout cookie' } unless saml_post_binding_request? && cookie_context
+
+          pending_resolution cookie_context, fallback: true
+        end
+
+        def pending_resolution(context, fallback:)
+          {
+            active_session: false,
+            fallback: fallback,
+            context: context,
+            transaction_id: context['transaction_id'],
+            login: context['login']
+          }
+        end
+
+        def legacy_pending_matches_cookie?(context)
+          session[:transaction_id].to_s == context['transaction_id'].to_s &&
+            session[:saml_logout_login].to_s == context['login'].to_s
+        end
+
+        def slo_cookie
+          @slo_cookie ||= RedmineSaml::SloCookie.new self
+        end
+
+        def clear_slo_cookies
+          slo_cookie.delete_all
+        end
+
+        def clear_redmine_autologin_cookie
+          secure = Redmine::Configuration['autologin_cookie_secure']
+          secure = request.ssl? if secure.nil?
+          path = Redmine::Configuration['autologin_cookie_path'] ||
+                 RedmineApp::Application.config.relative_url_root || '/'
+          cookies[autologin_cookie_name] = {
+            value: '',
+            expires: 1.year.ago,
+            path: path,
+            same_site: :lax,
+            secure: secure,
+            httponly: true
+          }
         end
 
         def name_identifier_value
