@@ -3,6 +3,7 @@
 require File.expand_path '../../test_helper', __FILE__
 
 class AccountHelperTest < Redmine::HelperTest
+  include RedmineSaml::TestHelper
   include OmniauthSamlAccountHelper
   include Redmine::I18n
 
