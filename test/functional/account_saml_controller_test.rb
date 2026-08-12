@@ -55,10 +55,12 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       assert_includes response.headers['Cache-Control'], 'no-store'
       assert_select '#saml-request-bridge form#saml-request-form[method="post"][action="/auth/saml"]' do
         assert_select '[data-remote]', 0
-        assert_select 'input[name="origin"][value="/projects?status=active"]', 1
+        origin_input = css_select('input[name="origin"]').first
+        assert origin_input
+        assert_equal '/projects?status=active', origin_input['value']
         assert_select 'button[type="submit"]', 1
       end
-      assert_select 'script[src*="/plugin_assets/redmine_saml/javascripts/saml_request.js"][defer]', 1
+      assert_select 'script[src*="/assets/plugin_assets/redmine_saml/saml_request.js"][defer]', 1
     end
 
     should 'discard an external origin instead of reflecting it into the POST bridge' do
@@ -95,7 +97,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       assert_response :success
       assert_select 'form#saml-request-form[action="/redmine/auth/saml"]'
       assert_select 'input[name="origin"][value="/redmine/projects"]', 1
-      assert_select 'script[src*="/redmine/plugin_assets/redmine_saml/javascripts/saml_request.js"]', 1
+      assert_select 'script[src*="/redmine/assets/plugin_assets/redmine_saml/saml_request.js"]', 1
     ensure
       Rails.application.config.relative_url_root = original_relative_url_root
       @request.env['SCRIPT_NAME'] = original_script_name
@@ -1659,9 +1661,10 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
   end
 
   def write_slo_cookie(name, context)
+    slo_cookie = RedmineSaml::SloCookie.new request: request, cookies: cookies
     cookies.encrypted[name] = {
       value: RedmineSaml::SloContext.dump(context),
-      path: @controller.send(:slo_cookie).path,
+      path: slo_cookie.path,
       secure: true,
       httponly: true,
       same_site: :none
