@@ -10,8 +10,9 @@ module RedmineSaml
     end
 
     def call(env)
-      return [404, { 'content-type' => 'text/plain', 'content-length' => '0' }, []] if unsupported_omniauth_slo_path? env
-      return @app.call env unless disabled_saml_authentication_path? env
+      path = normalized_omniauth_path env
+      return [404, { 'content-type' => 'text/plain', 'content-length' => '0' }, []] if unsupported_omniauth_slo_path? path
+      return @app.call env unless disabled_saml_authentication_path? path
 
       [302,
        { 'location' => "#{env['SCRIPT_NAME'].to_s.chomp '/'}/login",
@@ -22,12 +23,17 @@ module RedmineSaml
 
     private
 
-    def unsupported_omniauth_slo_path?(env)
-      UNSUPPORTED_OMNIAUTH_SLO_PATHS.include? env['PATH_INFO']
+    def normalized_omniauth_path(env)
+      # Keep path recognition aligned with OmniAuth::Strategy#current_path.
+      env['PATH_INFO'].to_s.downcase.sub %r{/$}, ''
     end
 
-    def disabled_saml_authentication_path?(env)
-      AUTHENTICATION_PATHS.include?(env['PATH_INFO']) && !RedmineSaml.enabled?
+    def unsupported_omniauth_slo_path?(path)
+      UNSUPPORTED_OMNIAUTH_SLO_PATHS.include? path
+    end
+
+    def disabled_saml_authentication_path?(path)
+      AUTHENTICATION_PATHS.include?(path) && !RedmineSaml.enabled?
     end
   end
 end
