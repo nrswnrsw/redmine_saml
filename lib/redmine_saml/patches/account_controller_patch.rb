@@ -169,8 +169,9 @@ module RedmineSaml
             return reject_saml_logout 'stale SAML session context' unless session_consumed
 
             reset_session
-            clear_slo_cookies
+            clear_redmine_session_cookie
             clear_redmine_autologin_cookie
+            clear_slo_cookies
             redirect_to logout_response, allow_other_host: true
           end
         rescue StandardError => e
@@ -591,6 +592,18 @@ module RedmineSaml
 
         def clear_slo_cookies
           slo_cookie.delete_all
+        end
+
+        def clear_redmine_session_cookie
+          configured_options = Rails.application.config.session_options.to_h.symbolize_keys
+          runtime_options = request.session_options.to_hash.symbolize_keys
+          cookie_name = configured_options[:key] || runtime_options[:key]
+          return if cookie_name.blank?
+
+          cookie_options = configured_options.merge(runtime_options)
+                                             .slice(:path, :domain, :secure, :httponly, :same_site)
+          cookie_options.delete :domain if cookie_options[:domain].nil?
+          cookies[cookie_name] = cookie_options.merge value: '', expires: 1.year.ago
         end
 
         def clear_redmine_autologin_cookie

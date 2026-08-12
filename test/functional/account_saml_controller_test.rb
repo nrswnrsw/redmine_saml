@@ -60,7 +60,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
         assert_equal '/projects?status=active', origin_input['value']
         assert_select 'button[type="submit"]', 1
       end
-      assert_select 'script[src*="/assets/plugin_assets/redmine_saml/saml_request.js"][defer]', 1
+      assert_saml_request_script_src ''
     end
 
     should 'discard an external origin instead of reflecting it into the POST bridge' do
@@ -97,7 +97,7 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       assert_response :success
       assert_select 'form#saml-request-form[action="/redmine/auth/saml"]'
       assert_select 'input[name="origin"][value="/redmine/projects"]', 1
-      assert_select 'script[src*="/redmine/assets/plugin_assets/redmine_saml/saml_request.js"]', 1
+      assert_saml_request_script_src '/redmine'
     ensure
       Rails.application.config.relative_url_root = original_relative_url_root
       @request.env['SCRIPT_NAME'] = original_script_name
@@ -1122,8 +1122,13 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       assert Token.exists?(other_token.id)
       assert_saml_session_deleted
       assert_nil read_active_slo_cookie
-      set_cookie = response.headers['Set-Cookie'].to_s
-      assert_includes set_cookie, Rails.application.config.session_options[:key]
+      session_options = Rails.application.config.session_options
+      session_cookie_name = session_options[:key]
+      session_cookie = cookie_header_for session_cookie_name
+      assert session_cookie
+      assert_match(/\A#{Regexp.escape session_cookie_name}=;/, session_cookie)
+      assert_match(/expires=/i, session_cookie)
+      assert_match(/path=#{Regexp.escape session_options[:path]}(?:;|\z)/i, session_cookie)
       autologin_cookie = cookie_header_for autologin_name
       assert autologin_cookie
       assert_match(/\A#{Regexp.escape autologin_name}=;/, autologin_cookie)
@@ -1288,6 +1293,8 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
 
       assert_response :bad_request
       assert Token.exists?(target_token.id)
+      session_cookie_name = Rails.application.config.session_options[:key]
+      assert_nil cookie_header_for session_cookie_name
     end
 
     should 'keep the exact session Token when the fallback signature is invalid' do
@@ -1302,6 +1309,8 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
 
       assert_response :bad_request
       assert Token.exists?(target_token.id)
+      session_cookie_name = Rails.application.config.session_options[:key]
+      assert_nil cookie_header_for session_cookie_name
     end
   end
 
@@ -1697,6 +1706,20 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
   def cookie_header_for(name)
     headers = Array.wrap(response.headers['Set-Cookie']).flat_map { |header| header.to_s.split "\n" }
     headers.find { |header| header.start_with? "#{name}=" }
+  end
+
+  def assert_saml_request_script_src(script_name)
+    expected_path = %r{\A#{Regexp.escape script_name}/assets/plugin_assets/redmine_saml/saml_request(?:-[^/?]+)?\.js\z}
+    sources = css_select('script[defer]').filter_map { |script| script['src'] }
+
+    matching_source = sources.find do |source|
+      uri = URI.parse source
+      path_matches = uri.path.match? expected_path
+      uri.host.nil? && path_matches
+    end
+
+    assert matching_source,
+           "Expected the SAML request plugin asset under #{script_name.presence || '/'}; got #{sources.inspect}"
   end
 
   def assert_saml_session_active
