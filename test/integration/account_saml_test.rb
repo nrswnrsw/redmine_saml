@@ -1,6 +1,10 @@
 # frozen_string_literal: true
 
 require File.expand_path '../../test_helper', __FILE__
+require 'base64'
+require 'rexml/document'
+require 'uri'
+require 'zlib'
 
 class AccountSAMLTest < Redmine::IntegrationTest
   OMNIAUTH_SLO_PATH_VARIANTS = %w[
@@ -75,6 +79,135 @@ class AccountSAMLTest < Redmine::IntegrationTest
           assert_nil session[:user_id], path
         end
       end
+    end
+
+    should 'redirect a disabled request phase to login under the relative URL root' do
+      downstream = ->(_env) { [204, {}, ['downstream']] }
+      gate = RedmineSaml::AuthenticationGate.new downstream
+
+      status, headers, body = gate.call 'PATH_INFO' => '/auth/saml',
+                                        'SCRIPT_NAME' => '/redmine'
+
+      assert_equal 302, status
+      assert_equal '/redmine/login', headers['location']
+      assert_empty body
+    end
+  end
+
+  context 'replace Redmine login OmniAuth request phase' do
+    setup do
+      Setting.default_language = 'en'
+      change_saml_settings saml_enabled: 1,
+                           onthefly_creation: 0,
+                           replace_redmine_login: 1
+    end
+
+    should 'submit a CSRF-protected bridge through the production OmniAuth request phase' do
+      origin = '/projects?status=active'
+
+      with_forgery_protection do
+        authenticity_token = load_saml_request_bridge origin
+
+        request_phase_calls = []
+        with_omniauth_request_phase_tracking request_phase_calls do
+          with_omniauth_production_mode do
+            post '/auth/saml', params: {
+              authenticity_token: authenticity_token,
+              origin: origin
+            }
+          end
+        end
+
+        assert_response :redirect
+        assert_equal ['/auth/saml'], request_phase_calls
+        redirect_uri = URI.parse response.location
+        idp_sso_uri = URI.parse RedmineSaml.configured_saml[:idp_sso_service_url]
+        assert_equal idp_sso_uri.scheme, redirect_uri.scheme
+        assert_equal idp_sso_uri.host, redirect_uri.host
+        assert_equal idp_sso_uri.path, redirect_uri.path
+        authn_request = Rack::Utils.parse_query(redirect_uri.query)['SAMLRequest']
+        assert authn_request.present?
+        assert_equal origin, session['omniauth.origin']
+        assert_valid_authn_request authn_request
+
+        with_omniauth_test_mode 'saml_login' => 'admin' do
+          get RedmineSaml::CALLBACK_PATH
+        end
+
+        assert_redirected_to origin
+        assert_equal users(:users_001).id, session[:user_id]
+      end
+    end
+
+    should 'reject a production OmniAuth request without a CSRF token before creating an AuthnRequest' do
+      with_forgery_protection do
+        get '/auth/saml'
+        assert_response :success
+
+        request_phase_calls = []
+        with_omniauth_request_phase_tracking request_phase_calls do
+          with_omniauth_production_mode do
+            post '/auth/saml', params: { origin: '/projects' }
+          end
+        end
+
+        assert_empty request_phase_calls
+        assert_no_authn_request_redirect
+      end
+    end
+
+    should 'reject a production OmniAuth request with an invalid CSRF token before creating an AuthnRequest' do
+      with_forgery_protection do
+        get '/auth/saml'
+        assert_response :success
+
+        request_phase_calls = []
+        with_omniauth_request_phase_tracking request_phase_calls do
+          with_omniauth_production_mode do
+            post '/auth/saml', params: {
+              authenticity_token: 'invalid-authenticity-token',
+              origin: '/projects'
+            }
+          end
+        end
+
+        assert_empty request_phase_calls
+        assert_no_authn_request_redirect
+      end
+    end
+
+    should 'render the POST bridge for a direct GET request phase URL' do
+      get '/auth/saml', params: { origin: '/projects' }
+
+      assert_response :success
+      assert_includes response.headers['Cache-Control'], 'no-store'
+      assert_select 'form#saml-request-form[method="post"][action="/auth/saml"]' do
+        assert_select 'input[name="origin"][value="/projects"]', 1
+        assert_select 'button[type="submit"]', 1
+      end
+    end
+
+    should 'keep the standard Redmine login and existing SAML POST button when replacement is disabled' do
+      change_saml_settings replace_redmine_login: 0
+
+      get '/login'
+
+      assert_response :success
+      assert_select '#saml-login form[method="post"][action="/auth/saml"]', 1
+      assert_select '#saml-request-bridge', 0
+    end
+
+    should 'show the standard Redmine login without a redirect loop when SAML is disabled' do
+      change_saml_settings saml_enabled: 0
+
+      get '/auth/saml'
+
+      assert_redirected_to '/login'
+      follow_redirect!
+      assert_response :success
+      assert_select '#login-form', 1
+      assert_select '#saml-login', 0
+      assert_select '#saml-request-bridge', 0
     end
   end
 
@@ -247,6 +380,87 @@ class AccountSAMLTest < Redmine::IntegrationTest
     yield
   ensure
     OmniAuth.config.test_mode = original_test_mode
+  end
+
+  def with_omniauth_test_mode(mock_auth)
+    original_test_mode = OmniAuth.config.test_mode
+    original_mock_auth = OmniAuth.config.mock_auth[:saml]
+    OmniAuth.config.test_mode = true
+    OmniAuth.config.mock_auth[:saml] = mock_auth
+    yield
+  ensure
+    OmniAuth.config.test_mode = original_test_mode
+    OmniAuth.config.mock_auth[:saml] = original_mock_auth
+  end
+
+  def with_omniauth_request_phase_tracking(request_phase_calls)
+    original_before_request_phase = OmniAuth.config.before_request_phase
+    OmniAuth.config.before_request_phase = proc do |env|
+      original_before_request_phase&.call env
+      request_phase_calls << env['PATH_INFO']
+    end
+    yield
+  ensure
+    OmniAuth.config.before_request_phase = original_before_request_phase
+  end
+
+  def with_forgery_protection
+    original_forgery_protection = ActionController::Base.allow_forgery_protection
+    ActionController::Base.allow_forgery_protection = true
+    yield
+  ensure
+    ActionController::Base.allow_forgery_protection = original_forgery_protection
+  end
+
+  def load_saml_request_bridge(origin)
+    get '/login', params: { back_url: origin }
+    assert_response :redirect
+    bridge_uri = URI.parse response.location
+    assert_equal '/auth/saml', bridge_uri.path
+    assert_equal origin, Rack::Utils.parse_query(bridge_uri.query)['origin']
+
+    follow_redirect!
+    assert_response :success
+    assert_select 'form#saml-request-form[method="post"][action="/auth/saml"]'
+    token_input = css_select('#saml-request-form input[name="authenticity_token"]').first
+    assert token_input.present?
+    assert token_input['value'].present?
+
+    token_input['value']
+  end
+
+  def assert_valid_authn_request(encoded_request)
+    inflater = Zlib::Inflate.new(-Zlib::MAX_WBITS)
+    xml = inflater.inflate Base64.decode64(encoded_request)
+    xml << inflater.finish
+    document = REXML::Document.new xml
+    authn_request = document.root
+    namespaces = {
+      'saml' => 'urn:oasis:names:tc:SAML:2.0:assertion',
+      'samlp' => 'urn:oasis:names:tc:SAML:2.0:protocol'
+    }
+
+    assert_equal 'AuthnRequest', authn_request.name
+    assert_equal RedmineSaml.configured_saml[:idp_sso_service_url], authn_request.attributes['Destination']
+    assert_equal RedmineSaml.configured_saml[:assertion_consumer_service_url],
+                 authn_request.attributes['AssertionConsumerServiceURL']
+    assert_equal RedmineSaml.configured_saml[:sp_entity_id],
+                 REXML::XPath.first(authn_request, './saml:Issuer', namespaces).text
+    assert_equal RedmineSaml.configured_saml[:name_identifier_format],
+                 REXML::XPath.first(authn_request, './samlp:NameIDPolicy', namespaces).attributes['Format']
+  ensure
+    inflater&.close
+  end
+
+  def assert_no_authn_request_redirect
+    assert_response :redirect
+    location = response.location.to_s
+    assert_not_includes location, RedmineSaml.configured_saml[:idp_sso_service_url]
+    failure_uri = URI.parse location
+    assert_equal '/auth/failure', failure_uri.path
+    query = Rack::Utils.parse_query failure_uri.query.to_s
+    assert_equal 'authenticity_error', query['message']
+    assert_nil query['SAMLRequest']
   end
 
   def unsigned_logout_request_params

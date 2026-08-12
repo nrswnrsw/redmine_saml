@@ -4,6 +4,13 @@ const zlib = require('zlib');
 const REDMINE_ORIGIN = 'http://127.0.0.1:3000';
 const KEYCLOAK_ORIGIN = 'http://127.0.0.1:8080';
 const KEYCLOAK_SAML_PATH = '/realms/redmine-e2e/protocol/saml';
+const REDMINE_CALLBACK_PATH = '/auth/saml/callback';
+const REDMINE_ENTITY_ID = `${REDMINE_ORIGIN}/auth/saml/metadata`;
+const SAML_NAME_ID_FORMAT = 'urn:oasis:names:tc:SAML:2.0:nameid-format:persistent';
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 function samlParameter(request, name) {
   const url = new URL(request.url());
@@ -21,6 +28,22 @@ function isKeycloakSamlRequest(request, parameter) {
   return url.origin === KEYCLOAK_ORIGIN &&
     url.pathname === KEYCLOAK_SAML_PATH &&
     samlParameter(request, parameter);
+}
+
+function isRedmineSamlRequestPhase(request) {
+  const url = new URL(request.url());
+
+  return url.origin === REDMINE_ORIGIN &&
+    url.pathname === '/auth/saml' &&
+    request.method() === 'POST';
+}
+
+function isRedmineSamlCallback(request) {
+  const url = new URL(request.url());
+
+  return url.origin === REDMINE_ORIGIN &&
+    url.pathname === REDMINE_CALLBACK_PATH &&
+    samlParameter(request, 'SAMLResponse');
 }
 
 function isRedmineSlsRequest(request, parameter) {
@@ -48,20 +71,79 @@ function decodePostMessage(message) {
 }
 
 test('login to Redmine through real SAML IdP', async ({ page }) => {
-  await page.goto('http://127.0.0.1:3000/login');
+  let redmineRequestPhaseCount = 0;
+  page.on('request', request => {
+    if (isRedmineSamlRequestPhase(request)) {
+      redmineRequestPhaseCount += 1;
+    }
+  });
+  const redmineRequestPhasePromise = page.waitForRequest(isRedmineSamlRequestPhase);
+  const redmineRequestPhaseResponsePromise = page.waitForResponse(
+    response => isRedmineSamlRequestPhase(response.request())
+  );
+  const keycloakAuthnRequestPromise = page.waitForRequest(
+    request => isKeycloakSamlRequest(request, 'SAMLRequest')
+  );
 
-  const samlButton = page.locator('#saml-login button');
-  await expect(samlButton).toHaveText('Login with SSO');
+  await page.goto(`${REDMINE_ORIGIN}/login`, { waitUntil: 'commit' });
 
-  await samlButton.click();
+  const [redmineRequestPhase, redmineRequestPhaseResponse, keycloakAuthnRequest] = await Promise.all([
+    redmineRequestPhasePromise,
+    redmineRequestPhaseResponsePromise,
+    keycloakAuthnRequestPromise
+  ]);
+
+  expect(redmineRequestPhase.method()).toBe('POST');
+  const requestPhaseParameters = new URLSearchParams(redmineRequestPhase.postData() || '');
+  expect(requestPhaseParameters.get('authenticity_token')).toBeTruthy();
+  expect(redmineRequestPhaseResponse.status()).toBe(302);
+  const requestPhaseLocation = redmineRequestPhaseResponse.headers().location;
+  expect(requestPhaseLocation).toContain(`${KEYCLOAK_ORIGIN}${KEYCLOAK_SAML_PATH}`);
+  expect(new URL(requestPhaseLocation).searchParams.get('SAMLRequest')).toBeTruthy();
+
+  expect(keycloakAuthnRequest.method()).toBe('GET');
+  const authnRequestXml = decodeRedirectMessage(
+    samlParameter(keycloakAuthnRequest, 'SAMLRequest')
+  );
+  expect(authnRequestXml).toMatch(/<(?:[\w-]+:)?AuthnRequest\b/);
+  expect(authnRequestXml).toMatch(
+    new RegExp(`\\bDestination=['"]${escapeRegExp(KEYCLOAK_ORIGIN + KEYCLOAK_SAML_PATH)}['"]`)
+  );
+  expect(authnRequestXml).toMatch(
+    new RegExp(`\\bAssertionConsumerServiceURL=['"]${escapeRegExp(REDMINE_ORIGIN + REDMINE_CALLBACK_PATH)}['"]`)
+  );
+  expect(authnRequestXml).toMatch(
+    new RegExp(`<(?:[\\w-]+:)?Issuer[^>]*>${escapeRegExp(REDMINE_ENTITY_ID)}</(?:[\\w-]+:)?Issuer>`)
+  );
+  expect(authnRequestXml).toMatch(
+    new RegExp(`\\bFormat=['"]${escapeRegExp(SAML_NAME_ID_FORMAT)}['"]`)
+  );
+
+  const authnRequestId = authnRequestXml.match(/\bID=['"]([^'"]+)['"]/);
+  expect(authnRequestId).not.toBeNull();
 
   await expect(page).toHaveURL(
     /127\.0\.0\.1:8080\/realms\/redmine-e2e/
   );
 
+  const redmineCallbackPromise = page.waitForRequest(isRedmineSamlCallback);
   await page.locator('#username').fill('samltest');
   await page.locator('#password').fill('samltest-password');
   await page.locator('#kc-login').click();
+
+  const redmineCallback = await redmineCallbackPromise;
+  expect(redmineCallback.method()).toBe('POST');
+  const samlResponseXml = decodePostMessage(
+    samlParameter(redmineCallback, 'SAMLResponse')
+  );
+  expect(samlResponseXml).toMatch(/<(?:[\w-]+:)?Response\b/);
+  expect(samlResponseXml).toMatch(/<(?:[\w-]+:)?Signature\b/);
+  expect(samlResponseXml).toMatch(
+    new RegExp(`\\bDestination=['"]${escapeRegExp(REDMINE_ORIGIN + REDMINE_CALLBACK_PATH)}['"]`)
+  );
+  expect(samlResponseXml).toMatch(
+    new RegExp(`\\bInResponseTo=['"]${escapeRegExp(authnRequestId[1])}['"]`)
+  );
 
   await expect(page).toHaveURL(
     /127\.0\.0\.1:3000\/my\/page/
@@ -70,16 +152,13 @@ test('login to Redmine through real SAML IdP', async ({ page }) => {
   await expect(
     page.locator('div.flyout-menu__avatar a.user.active')
   ).toHaveText('samltest');
+  expect(redmineRequestPhaseCount).toBe(1);
 });
 
 test('log out of Redmine and Keycloak through real SAML SLO', async ({ page }) => {
   test.setTimeout(60000);
 
-  await page.goto(`${REDMINE_ORIGIN}/login`);
-
-  const samlButton = page.locator('#saml-login button');
-  await expect(samlButton).toHaveText('Login with SSO');
-  await samlButton.click();
+  await page.goto(`${REDMINE_ORIGIN}/login`, { waitUntil: 'commit' });
 
   await expect(page).toHaveURL(
     /127\.0\.0\.1:8080\/realms\/redmine-e2e/
@@ -171,16 +250,7 @@ test('log out of Redmine and Keycloak through real SAML SLO', async ({ page }) =
     page.locator('div.flyout-menu__avatar a.user.active')
   ).toHaveCount(0);
 
-  await page.goto(`${REDMINE_ORIGIN}/my/page`);
-  await expect(page).toHaveURL(/127\.0\.0\.1:3000\/login(?:\?|$)/);
-  await expect(
-    page.locator('div.flyout-menu__avatar a.user.active')
-  ).toHaveCount(0);
-
-  const secondSamlButton = page.locator('#saml-login button');
-  await expect(secondSamlButton).toHaveText('Login with SSO');
-  await secondSamlButton.click();
-
+  await page.goto(`${REDMINE_ORIGIN}/my/page`, { waitUntil: 'commit' });
   await expect(page).toHaveURL(
     /127\.0\.0\.1:8080\/realms\/redmine-e2e/
   );

@@ -192,7 +192,7 @@ jobs:
               sp_entity_id: 'http://127.0.0.1:3000/auth/saml/metadata',
               single_logout_service_url: 'http://127.0.0.1:3000/auth/saml/sls',
 
-              idp_sso_service_url: 'http://127.0.0.1:8080/realms/redmine-e2e/protocol/saml/clients/redmine',
+              idp_sso_service_url: 'http://127.0.0.1:8080/realms/redmine-e2e/protocol/saml',
               idp_slo_service_url: 'http://127.0.0.1:8080/realms/redmine-e2e/protocol/saml',
               signout_url: 'http://127.0.0.1:8080/realms/redmine-e2e/protocol/saml',
               idp_entity_id: {json.dumps(idp_entity_id)},
@@ -244,6 +244,10 @@ jobs:
 
           user.activate
           user.save!
+
+          saml_settings = Setting.plugin_redmine_saml.dup
+          saml_settings['replace_redmine_login'] = '1'
+          Setting.plugin_redmine_saml = saml_settings
 
           puts "Created Redmine E2E user: #{user.login}"
           RUBY

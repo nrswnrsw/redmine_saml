@@ -37,24 +37,68 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
 
       change_saml_settings saml_enabled: 1
       get :login
-      assert_select '#saml-login'
+      assert_select '#saml-login form[method="post"][action="/auth/saml"]'
     end
   end
 
   context 'GET login_with_saml_redirect' do
-    should 'redirect to the configured external IdP without an open redirect warning' do
-      idp_sso_service_url = 'https://trusted-idp.example.test/saml/login'
-      RedmineSaml.configured_saml[:idp_sso_service_url] = idp_sso_service_url
+    should 'render a no-store POST bridge with a validated origin and external JavaScript' do
       Rails.logger.expects(:warn).with(regexp_matches(/\AOpen redirect to /)).never
 
+      get :login_with_saml_redirect,
+          params: {
+            provider: 'saml',
+            origin: '/projects?status=active'
+          }
+
+      assert_response :success
+      assert_includes response.headers['Cache-Control'], 'no-store'
+      assert_select '#saml-request-bridge form#saml-request-form[method="post"][action="/auth/saml"]' do
+        assert_select '[data-remote]', 0
+        assert_select 'input[name="origin"][value="/projects?status=active"]', 1
+        assert_select 'button[type="submit"]', 1
+      end
+      assert_select 'script[src*="/plugin_assets/redmine_saml/javascripts/saml_request.js"][defer]', 1
+    end
+
+    should 'discard an external origin instead of reflecting it into the POST bridge' do
       get :login_with_saml_redirect,
           params: {
             provider: 'saml',
             origin: 'https://attacker.example/origin'
           }
 
-      assert_redirected_to idp_sso_service_url
-      assert_equal 'trusted-idp.example.test', URI.parse(@response.redirect_url).host
+      assert_response :success
+      assert_select '#saml-request-form input[name="origin"]', 0
+      assert_not_includes response.body, 'attacker.example'
+    end
+
+    should 'fail closed if a POST reaches the Rails controller instead of OmniAuth' do
+      post :login_with_saml_redirect,
+           params: { provider: 'saml' }
+
+      assert_response :method_not_allowed
+    end
+
+    should 'generate bridge URLs under the configured relative URL root' do
+      original_relative_url_root = Rails.application.config.relative_url_root
+      original_script_name = @request.env['SCRIPT_NAME']
+      Rails.application.config.relative_url_root = '/redmine'
+      @request.env['SCRIPT_NAME'] = '/redmine'
+
+      get :login_with_saml_redirect,
+          params: {
+            provider: 'saml',
+            origin: '/redmine/projects'
+          }
+
+      assert_response :success
+      assert_select 'form#saml-request-form[action="/redmine/auth/saml"]'
+      assert_select 'input[name="origin"][value="/redmine/projects"]', 1
+      assert_select 'script[src*="/redmine/plugin_assets/redmine_saml/javascripts/saml_request.js"]', 1
+    ensure
+      Rails.application.config.relative_url_root = original_relative_url_root
+      @request.env['SCRIPT_NAME'] = original_script_name
     end
 
     should 'redirect to /login without starting SAML authentication when SAML is disabled' do
@@ -300,7 +344,8 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       assert RedmineSaml.enabled?
 
       get :login_with_saml_redirect, params: { provider: 'saml' }
-      assert_redirected_to RedmineSaml.configured_saml[:idp_sso_service_url]
+      assert_response :success
+      assert_select 'form#saml-request-form[method="post"][action="/auth/saml"]'
 
       RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
       establish_saml_session
@@ -316,7 +361,8 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       assert RedmineSaml.enabled?
 
       get :login_with_saml_redirect, params: { provider: 'saml' }
-      assert_redirected_to RedmineSaml.configured_saml[:idp_sso_service_url]
+      assert_response :success
+      assert_select 'form#saml-request-form[method="post"][action="/auth/saml"]'
 
       RedmineSaml.configured_saml[:signout_url] = 'https://saml.server/logout?return='
       establish_saml_session

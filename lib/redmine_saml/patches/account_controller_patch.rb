@@ -33,7 +33,11 @@ module RedmineSaml
         end
 
         def login_with_saml_redirect
-          redirect_to ::RedmineSaml.configured_saml['idp_sso_service_url'], allow_other_host: true
+          return head :method_not_allowed unless request.request_method == 'GET'
+
+          @saml_origin = validate_back_url params[:origin].to_s
+          no_store
+          render 'saml/login_with_saml_redirect'
         end
 
         def login_with_saml_callback
