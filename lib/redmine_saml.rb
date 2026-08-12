@@ -3,6 +3,7 @@
 require_relative 'redmine_saml/slo_context'
 require_relative 'redmine_saml/slo_token_store'
 require_relative 'redmine_saml/slo_cookie'
+require_relative 'redmine_saml/slo_post_signature'
 
 module RedmineSaml
   VERSION = '1.1.0'
