@@ -14,6 +14,7 @@ This file records notable user-facing changes to the maintained `nrswnrsw/redmin
 - Reorganized the internal SAML Redirect binding query handling, HTTP-POST signature validation, and authentication log formatting into separate classes without changing behavior.
 - Extended regression test coverage for the `Destination` fallback, for the Redmine logout action, and for a settings helper test file that the plugin test task did not previously collect.
 - Improved the 1.0.6 upgrade guidance in the README, including the Redmine version prerequisite, the fingerprint-only HTTP-Redirect Single Logout case, and post-upgrade verification steps.
+- Constrained `omniauth-rails_csrf_protection` to version 1.0.2 or later while excluding 2.0.0, which breaks the OmniAuth request phase on Rails versions before 8.1.
 
 Upgrading from `alphanodes/redmine_saml` 1.0.6 also involves the migration steps listed under 1.1.0 below.
 
