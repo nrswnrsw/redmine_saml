@@ -71,8 +71,15 @@ This file records notable user-facing changes to the maintained `nrswnrsw/redmin
 3. Run `bundle install` from the Redmine root.
 4. Run the standard plugin migration: `bundle exec rake redmine:plugins:migrate RAILS_ENV=production`.
 5. Restart the Redmine application server.
+6. If Single Logout is in use, update the Single Logout endpoint registered in the IdP. See the migration note below.
 
 Additionals is not required for 1.1.0, but an existing Additionals installation does not need to be removed. Existing initializers do not need to add `idp_entity_id`; it remains optional, though recommended for stricter SLO Issuer validation.
+
+#### IdP Single Logout endpoint migration
+
+Handling of SAML messages sent by the IdP is consolidated on the plugin's own `/auth/saml/sls` endpoint, which validates the checks applicable to each message type before deleting a session: the signature, a present Issuer, and a matching `Destination` for both message types; the NameID and any SessionIndex for a `LogoutRequest`; and `InResponseTo` for a `LogoutResponse`. The Issuer is additionally compared with `idp_entity_id` when that optional setting is configured. 1.0.6 also reached SAML logout handling through `/logout`, and the legacy OmniAuth `/auth/saml/slo` and `/auth/saml/spslo` handlers were reachable as well. Those paths no longer process SAML logout messages sent by the IdP. Redmine's own `/logout` continues to handle normal logout and SP-initiated Single Logout.
+
+This is an IdP-side configuration change; the Redmine ACS URL `/auth/saml/callback` is unaffected. If the Single Logout Service URL registered in the IdP is `/logout`, `/auth/saml/slo`, or `/auth/saml/spslo`, change it to `/auth/saml/sls`, keeping any relative URL root prefix. Redmine initializers that already point `single_logout_service_url` at `/auth/saml/sls` need no change. See the README for the full checklist.
 
 ### Known compatibility notes
 

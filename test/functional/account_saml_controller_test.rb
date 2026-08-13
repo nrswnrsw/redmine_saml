@@ -310,6 +310,62 @@ class AccountSamlControllerTest < RedmineSaml::ControllerTest
       assert_saml_session_deleted
     end
 
+    # 1.0.6 dispatched SAMLRequest and SAMLResponse from the Redmine logout
+    # action. SLO message handling now belongs to redirect_after_saml_logout,
+    # so the logout action must not act on SAML messages any more.
+    should 'not process a SAMLRequest as IdP initiated SLO on the Redmine GET logout' do
+      establish_saml_session
+      Rails.logger.expects(:error).with('IdP initiated LogoutRequest was not valid!').never
+      info_logs = capture_info_logs
+
+      get :logout, params: signed_logout_request_params
+
+      assert_response :success
+      assert_empty info_logs.grep(/\AIdP initiated Logout for /)
+      assert_saml_session_active
+    end
+
+    should 'not process a SAMLRequest as IdP initiated SLO on the Redmine POST logout' do
+      enable_sp_initiated_slo
+      RedmineSaml.configured_saml[:idp_slo_service_url] = 'https://saml.server/ls/?wa=wsignout1'
+      establish_saml_session
+      Rails.logger.expects(:error).with('IdP initiated LogoutRequest was not valid!').never
+      info_logs = capture_info_logs
+
+      post :logout, params: signed_logout_request_params
+
+      assert_response :redirect
+      redirect_params = Rack::Utils.parse_query URI.parse(@response.redirect_url).query
+      assert redirect_params['SAMLRequest'].present?
+      assert_nil redirect_params['SAMLResponse']
+      assert_equal session[:transaction_id],
+                   OneLogin::RubySaml::SloLogoutrequest.new(redirect_params['SAMLRequest']).id
+      assert_empty info_logs.grep(/\AIdP initiated Logout for /)
+      assert_saml_session_deleted
+    end
+
+    should 'not process a SAMLResponse as an SP LogoutResponse on the Redmine POST logout' do
+      enable_sp_initiated_slo
+      RedmineSaml.configured_saml[:idp_slo_service_url] = 'https://saml.server/ls/?wa=wsignout1'
+      establish_saml_session
+      session[:transaction_id] = '_expected-request-id'
+      expected_login = User.current.login
+      Rails.logger.expects(:error).with('The SAML Logout Response is invalid').never
+      info_logs = capture_info_logs
+
+      post :logout, params: signed_logout_response_params(request_id: '_expected-request-id')
+
+      assert_response :redirect
+      redirect_params = Rack::Utils.parse_query URI.parse(@response.redirect_url).query
+      assert redirect_params['SAMLRequest'].present?
+      assert_nil redirect_params['SAMLResponse']
+      assert_not_includes info_logs, "Delete session for '#{expected_login}'"
+      assert_not_equal '_expected-request-id', session[:transaction_id]
+      assert_equal session[:transaction_id],
+                   OneLogin::RubySaml::SloLogoutrequest.new(redirect_params['SAMLRequest']).id
+      assert_saml_session_deleted
+    end
+
     should 'locally log out when the SP LogoutRequest cannot be generated' do
       enable_sp_initiated_slo
       RedmineSaml.configured_saml[:idp_slo_service_url] = nil

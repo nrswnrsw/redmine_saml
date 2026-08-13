@@ -64,6 +64,8 @@ Additionals is no longer required by this plugin. It does not need to be removed
 
 Optional settings such as `idp_entity_id` can strengthen validation, but they are not migration requirements for existing initializers.
 
+If Single Logout is in use, check the Single Logout endpoint registered in the IdP as well. 1.0.6 accepted SAML logout messages on several paths; `/auth/saml/sls` is now the only IdP-facing endpoint that processes SAML `LogoutRequest` and `LogoutResponse` messages. Redmine's own `/logout` is unaffected and still handles normal logout and SP-initiated Single Logout. See [Migrating the IdP Single Logout endpoint from 1.0.6](#migrating-the-idp-single-logout-endpoint-from-106).
+
 ## SAML configuration
 
 Copy and edit the [sample initializer](contrib/sample_saml_initializers.rb). The most important login settings are:
@@ -114,6 +116,59 @@ When an authenticated SAML user signs out through Redmine, the plugin creates a 
 IdP-initiated logout is accepted only for an active SAML session. The plugin validates the signed LogoutRequest and its SAML context before ending the local Redmine session and returning a LogoutResponse to the configured IdP endpoint. An unvalidated external request does not delete the Redmine session.
 
 On HTTPS deployments, cross-site HTTP-POST SLO can use a dedicated, short-lived `SameSite=None; Secure` cookie fallback. This fallback is limited to SLO and does not globally change the normal Redmine session cookie settings. HTTP deployments do not use the fallback and retain the existing session-based path; HTTPS is not a new general requirement for SAML login.
+
+#### Migrating the IdP Single Logout endpoint from 1.0.6
+
+**This step changes a setting in the IdP administration UI, not in Redmine.** The Redmine Assertion Consumer Service (ACS) URL `/auth/saml/callback` is a different endpoint and must be left unchanged.
+
+The Single Logout Service endpoint of this plugin is:
+
+```
+/auth/saml/sls
+```
+
+For a normal root deployment:
+
+```
+https://redmine.example.com/auth/saml/sls
+```
+
+When Redmine runs under a relative URL root, keep that prefix:
+
+```
+https://redmine.example.com/redmine/auth/saml/sls
+```
+
+1.0.6 could reach SAML logout handling through several paths. `/auth/saml/sls` is now the only endpoint that processes SAML `LogoutRequest` and `LogoutResponse` messages sent by the IdP. If the IdP is still configured with one of the following, IdP-initiated Single Logout will no longer be processed and the endpoint has to be updated:
+
+| Endpoint registered in the IdP | Replace with |
+| --- | --- |
+| `https://redmine.example.com/logout` | `https://redmine.example.com/auth/saml/sls` |
+| `https://redmine.example.com/auth/saml/slo` | `https://redmine.example.com/auth/saml/sls` |
+| `https://redmine.example.com/auth/saml/spslo` | `https://redmine.example.com/auth/saml/sls` |
+
+The setting is named differently per IdP product. Look for **Single Logout Service URL**, **Single Logout URL**, **SLO URL**, or **Logout Service URL**.
+
+Redmine's own `/logout` keeps working as before for normal logout and for starting SP-initiated Single Logout. Only the handling of SAML messages sent by the IdP moved to `/auth/saml/sls`.
+
+Incoming SLO messages are validated before any session is deleted, using the checks that apply to each message type:
+
+- Both message types: the signature, a present Issuer, and a `Destination` matching this Redmine SLS endpoint. The Issuer is additionally compared with `idp_entity_id` when that optional setting is configured.
+- `LogoutRequest`: also the NameID and, when the message carries one, the SessionIndex, matched against the SAML session being terminated.
+- `LogoutResponse`: also `InResponseTo`, matched against the transaction of the LogoutRequest this Redmine sent.
+
+That validation is implemented on the plugin's own `/auth/saml/sls` endpoint, so SLO handling is consolidated there instead of restoring the previous entry points.
+
+Checklist for the upgrade:
+
+1. Open the Redmine SAML client or application configuration in the IdP administration UI.
+2. Locate the Single Logout Service / SLO / Logout URL setting.
+3. If it is `/logout`, `/auth/saml/slo`, or `/auth/saml/spslo`, change it to `/auth/saml/sls`.
+4. Keep the relative URL root prefix if Redmine uses one.
+5. Leave the ACS URL `/auth/saml/callback` unchanged.
+6. Sign in to Redmine through SAML and confirm that logout completes normally.
+
+When the initializer sets `single_logout_service_url`, keep it aligned with the same URL, because that value is compared against the `Destination` of incoming SLO messages. A 1.0.6 initializer that omits the setting does not have to add it: the plugin then derives the expected `Destination` from `assertion_consumer_service_url`.
 
 ### Certificates, fingerprints, and SLO bindings
 
