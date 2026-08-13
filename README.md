@@ -51,20 +51,58 @@ Finally, enable and configure the plugin under **Administration > Plugins > Redm
 
 ## Upgrading from `alphanodes/redmine_saml`
 
-Existing AlphaNodes users can normally keep their current initializer unchanged. No new SAML setting is required solely to move to this maintained repository.
+Existing AlphaNodes users can normally keep their current initializer unchanged. No new SAML setting is required solely to move to this maintained repository. One case is an exception: a fingerprint-only initializer that has to validate HTTP-Redirect binding Single Logout. Step 7 below explains how to tell whether it applies.
 
-1. Preserve the existing file under `config/initializers/` and any deployment-specific configuration.
-2. Replace the code in `plugins/redmine_saml` with the current `nrswnrsw/redmine_saml` version.
-3. Keep the directory name exactly `redmine_saml`.
-4. Run `bundle install` from the Redmine root.
-5. Run `bundle exec rake redmine:plugins:migrate RAILS_ENV=production`.
-6. Restart the Redmine application server.
+Before starting, back up the existing SAML initializer under `config/initializers/` and the rest of your deployment configuration. This plugin adds no database migration of its own, so no data conversion is involved. When Redmine itself is upgraded at the same time, follow the normal Redmine upgrade backup procedure for that part.
 
-Additionals is no longer required by this plugin. It does not need to be removed from an existing Redmine installation.
+1. Check the Redmine version first. This plugin requires Redmine 6.0 or later, and that requirement applies at the moment Redmine loads it. If Redmine is still on 5.x, do not start Redmine with the current plugin version in place: plan the work so that Redmine is already on 6.0 or later the first time it starts with this plugin version. Updating Redmine and the plugin in the same maintenance window is fine. On Redmine 6.0 or later, no Redmine upgrade is needed for this reason.
+2. Preserve the existing file under `config/initializers/` and any deployment-specific configuration.
+3. Replace the code in `plugins/redmine_saml` with the current `nrswnrsw/redmine_saml` version.
+4. Keep the directory name exactly `redmine_saml`.
+5. Run `bundle install` from the Redmine root.
+6. Run `bundle exec rake redmine:plugins:migrate RAILS_ENV=production`.
+7. If Single Logout is in use, make the initializer changes it needs before restarting: follow [Switching from a fingerprint-only initializer](#switching-from-a-fingerprint-only-initializer) when that case applies, and confirm that an explicitly configured `single_logout_service_url` matches the `/auth/saml/sls` endpoint.
+8. Restart the Redmine application server.
+9. If Single Logout is in use, update the Single Logout endpoint registered in the IdP as described below.
+10. Verify the result as described in [Verify after upgrading](#verify-after-upgrading).
+
+Additionals is no longer required by this plugin. It does not need to be removed from an existing Redmine installation. This plugin itself has no Additionals dependency, so an administrator may remove Additionals once no other plugin in the installation needs it.
 
 Optional settings such as `idp_entity_id` can strengthen validation, but they are not migration requirements for existing initializers.
 
-If Single Logout is in use, check the Single Logout endpoint registered in the IdP as well. 1.0.6 accepted SAML logout messages on several paths; `/auth/saml/sls` is now the only IdP-facing endpoint that processes SAML `LogoutRequest` and `LogoutResponse` messages. Redmine's own `/logout` is unaffected and still handles normal logout and SP-initiated Single Logout. See [Migrating the IdP Single Logout endpoint from 1.0.6](#migrating-the-idp-single-logout-endpoint-from-106).
+If Single Logout is in use, check the Single Logout endpoint registered in the IdP as well. 1.0.6 accepted SAML logout messages on several paths; `/auth/saml/sls` is now the only IdP-facing endpoint that processes SAML `LogoutRequest` and `LogoutResponse` messages. Redmine's own `/logout` continues to handle normal logout and SP-initiated Single Logout. See [Migrating the IdP Single Logout endpoint from 1.0.6](#migrating-the-idp-single-logout-endpoint-from-106).
+
+### Switching from a fingerprint-only initializer
+
+This applies only when **all** of the following are true:
+
+- Single Logout is in use.
+- SLO messages are exchanged over the HTTP-Redirect binding.
+- The initializer sets `idp_cert_fingerprint` without `idp_cert` or `idp_cert_multi`.
+
+An HTTP-Redirect binding signature is verified over the query string and cannot be checked from a fingerprint alone, so those SLO messages are rejected. Redirect binding SLO therefore needs the IdP certificate itself.
+
+If Single Logout is not used, or SLO uses only the HTTP-POST binding, the existing fingerprint setting can stay exactly as it is. SAML login is also unaffected and keeps working with a fingerprint-only configuration.
+
+When the case applies:
+
+1. Export the public certificate that the IdP uses to sign SAML messages.
+2. Set it as `idp_cert` in the initializer, in PEM form.
+3. Remove `idp_cert_fingerprint` and `idp_cert_fingerprint_algorithm`. They are alternatives to `idp_cert` rather than additions, and `idp_cert` takes precedence when both are present.
+
+Then return to the upgrade procedure above and continue from the restart step; this change needs no separate restart of its own.
+
+See [Certificates, fingerprints, and SLO bindings](#certificates-fingerprints-and-slo-bindings) for the full description of the certificate options.
+
+### Verify after upgrading
+
+Check only the flows the deployment actually uses:
+
+1. Sign in to Redmine through SAML.
+2. If SP-initiated Single Logout is used, sign out from Redmine and confirm that the IdP session ends as well.
+3. If IdP-initiated Single Logout is used, sign out at the IdP and confirm that the Redmine session ends as well.
+
+If a step fails, check the Redmine production log for the SAML login and logout entries written during that attempt.
 
 ## SAML configuration
 

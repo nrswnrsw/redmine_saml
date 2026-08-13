@@ -66,12 +66,16 @@ This file records notable user-facing changes to the maintained `nrswnrsw/redmin
 
 ### Upgrade notes for 1.0.6 users
 
-1. Preserve the existing initializer under `config/initializers/`.
-2. Replace the code in `plugins/redmine_saml` with the maintained repository version, keeping the directory name `redmine_saml`.
-3. Run `bundle install` from the Redmine root.
-4. Run the standard plugin migration: `bundle exec rake redmine:plugins:migrate RAILS_ENV=production`.
-5. Restart the Redmine application server.
-6. If Single Logout is in use, update the Single Logout endpoint registered in the IdP. See the migration note below.
+1. Check the Redmine version first. Redmine 6.0 or later is required, and the requirement applies at the moment Redmine loads this plugin version. On Redmine 5.x, do not start Redmine with this plugin version in place; plan the work so that Redmine is already on 6.0 or later the first time it starts with it. Both updates can be done in the same maintenance window. On Redmine 6.0 or later, no Redmine upgrade is needed for this reason.
+2. Back up the existing initializer and deployment configuration. This plugin adds no database migration of its own.
+3. Preserve the existing initializer under `config/initializers/`.
+4. Replace the code in `plugins/redmine_saml` with the maintained repository version, keeping the directory name `redmine_saml`.
+5. Run `bundle install` from the Redmine root.
+6. Run the standard plugin migration: `bundle exec rake redmine:plugins:migrate RAILS_ENV=production`.
+7. If Single Logout is in use, make the initializer changes it needs now. When SLO uses the HTTP-Redirect binding and the initializer sets only `idp_cert_fingerprint`, replace it with the full IdP certificate in `idp_cert`; Redirect binding SLO cannot be validated from a fingerprint alone, while HTTP-POST binding SLO and SAML login keep working with a fingerprint. When `single_logout_service_url` is set explicitly, confirm that it matches the `/auth/saml/sls` endpoint.
+8. Restart the Redmine application server.
+9. If Single Logout is in use, update the Single Logout endpoint registered in the IdP. See the migration note below.
+10. Verify the flows the deployment uses: SAML login, and SP-initiated or IdP-initiated Single Logout where applicable.
 
 Additionals is not required for 1.1.0, but an existing Additionals installation does not need to be removed. Existing initializers do not need to add `idp_entity_id`; it remains optional, though recommended for stricter SLO Issuer validation.
 
