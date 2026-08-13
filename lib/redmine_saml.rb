@@ -6,7 +6,7 @@ require_relative 'redmine_saml/slo_cookie'
 require_relative 'redmine_saml/slo_post_signature'
 
 module RedmineSaml
-  VERSION = '1.1.0'
+  VERSION = '1.1.1'
 
   METADATA_PATH = '/auth/saml/metadata'
   CALLBACK_PATH = '/auth/saml/callback'

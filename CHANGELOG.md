@@ -2,6 +2,21 @@
 
 This file records notable user-facing changes to the maintained `nrswnrsw/redmine_saml` releases. Version 1.1.0 is the first maintained release based on the original `alphanodes/redmine_saml` 1.0.6 release and subsequent upstream work.
 
+## [1.1.1] - 2026-08-13
+
+### Fixed
+
+- Restored Single Logout for legacy initializers that do not set `single_logout_service_url`. When the setting is absent, the expected SLO `Destination` is derived from the required `assertion_consumer_service_url`, so a 1.0.6 initializer that omitted `single_logout_service_url` can keep working without adding that setting. An explicitly configured `single_logout_service_url` still takes precedence and its behavior is unchanged.
+- The `Destination` fallback does not relax any existing SLO validation checks. The expected value is never inferred from the incoming request, and a message is still rejected when no expected `Destination` can be established.
+
+### Maintenance
+
+- Reorganized the internal SAML Redirect binding query handling, HTTP-POST signature validation, and authentication log formatting into separate classes without changing behavior.
+- Extended regression test coverage for the `Destination` fallback, for the Redmine logout action, and for a settings helper test file that the plugin test task did not previously collect.
+- Improved the 1.0.6 upgrade guidance in the README, including the Redmine version prerequisite, the fingerprint-only HTTP-Redirect Single Logout case, and post-upgrade verification steps.
+
+Upgrading from `alphanodes/redmine_saml` 1.0.6 also involves the migration steps listed under 1.1.0 below.
+
 ## [1.1.0] - 2026-08-12
 
 ### Backward compatibility
