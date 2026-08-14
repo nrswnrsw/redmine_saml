@@ -10,13 +10,26 @@ module RedmineSaml
       end
 
       class_methods do
+        # Resolves an existing Redmine user from a SAML auth hash without any
+        # side effect: no user is created or updated, on-the-fly creation is
+        # not triggered and no login hook runs. It shares the lookup with
+        # find_or_create_from_omniauth so both cannot drift apart.
+        def find_from_omniauth_saml(omniauth)
+          find_from_saml_attributes RedmineSaml.user_attributes_from_saml(omniauth)
+        end
+
+        def find_from_saml_attributes(user_attributes)
+          user = nil
+          user = find_by_login user_attributes[:login] if user_attributes[:login].present?
+          user = EmailAddress.find_by(address: user_attributes[:mail]).try(:user) if user.nil?
+          user
+        end
+
         def find_or_create_from_omniauth(omniauth)
           user_attributes = RedmineSaml.user_attributes_from_saml omniauth
           # Additionals.debug "user_attributes: #{user_attributes.inspect}"
 
-          user = nil
-          user = find_by_login user_attributes[:login] if user_attributes[:login].present?
-          user = EmailAddress.find_by(address: user_attributes[:mail]).try(:user) if user.nil?
+          user = find_from_saml_attributes user_attributes
 
           if user.nil? && RedmineSaml.onthefly_creation? && user_attributes[:mail].present?
             Rails.logger.info "SAML onthefly user creation for: #{user_attributes[:mail]}"

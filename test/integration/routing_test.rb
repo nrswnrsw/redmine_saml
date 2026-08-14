@@ -20,4 +20,17 @@ class RoutingTest < Redmine::RoutingTest
       Rails.application.routes.recognize_path '/auth/blah/sls', method: :get
     end
   end
+
+  test 'routing saml sudo re-authentication' do
+    should_route 'POST /saml/sudo_reauth' => 'account#saml_sudo_reauth'
+
+    # The Sudo transaction is never started by a GET, and it deliberately does
+    # not live under /auth/saml where the OmniAuth SAML strategy would claim it.
+    assert_raises ActionController::RoutingError do
+      Rails.application.routes.recognize_path '/saml/sudo_reauth', method: :get
+    end
+    assert_raises ActionController::RoutingError do
+      Rails.application.routes.recognize_path '/auth/saml/sudo_reauth', method: :post
+    end
+  end
 end

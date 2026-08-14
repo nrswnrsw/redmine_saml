@@ -2,6 +2,32 @@
 
 This file records notable user-facing changes to the maintained `nrswnrsw/redmine_saml` releases. Version 1.1.0 is the first maintained release based on the original `alphanodes/redmine_saml` 1.0.6 release and subsequent upstream work.
 
+## [Unreleased]
+
+### Added
+
+- SAML confirmation for Redmine's Sudo Mode, on **Redmine 7.0 and later only**. When the Sudo Mode timeout expires and the current Redmine session was created by SAML, Redmine's local password prompt is replaced by a SAML confirmation button, both for the normal page prompt and for the modal shown by XHR requests. Redmine 7.0 enables Sudo Mode by default, so SAML-only users could otherwise no longer complete Sudo-protected actions.
+- The Sudo `AuthnRequest` is built from the configured SAML settings of the initializer, used unchanged, so the plugin adds or removes no authentication condition of its own, including `ForceAuthn` and `IsPassive`. With a standard, static initializer it therefore carries the same authentication conditions as a normal SAML login. Whether the IdP prompts the user again remains an IdP policy decision. Request-scoped mechanisms are the documented exception: see the known limitation in the README.
+- The Sudo transaction is correlated with the AuthnRequest ID through ruby-saml's `matches_request_id` (`InResponseTo`), a single-use RelayState nonce, a five minute expiry and a server-side single-use marker that is consumed atomically. A missing or unvalidated request ID fails the transaction instead of skipping the check.
+- A callback that looks like a Sudo transaction but has no usable transaction behind it is rejected before the SAML Response is processed at all, so omniauth-saml never replaces the SAML NameID and SessionIndex of the current session with those of a Response the session did not ask for. If a Sudo callback is rejected later, in the controller, those identifiers are restored from a snapshot taken before the replacement.
+
+### Backward compatibility
+
+- No new initializer setting, no change to an existing initializer, and no new plugin setting. Existing `alphanodes/redmine_saml` 1.0.6 initializers keep working unchanged. An OmniAuth `:setup` endpoint configured in the initializer is left untouched and keeps its original semantics, and `idp_sso_service_url_runtime_params` is unchanged for normal login. The README documents that those two request-scoped mechanisms do not reach the Sudo `AuthnRequest`.
+- No IdP configuration change, no additional ACS URL and no additional SAML provider registration. The existing `/auth/saml/callback` endpoint is reused.
+- No database migration and no data conversion. The single-use marker uses the existing Redmine `tokens` table through the documented `Token.add_action` interface.
+- The plugin directory name and plugin ID remain `redmine_saml`.
+- On Redmine 6.0 and 6.1 the feature is not active in any form, including when `sudo_mode: true` is configured. The `ApplicationController` patch is not applied there, the Sudo `setup_phase` extension is not installed on the OmniAuth SAML strategy, no Sudo transaction can be started, and SAML callbacks never enter the Sudo path.
+- Normal SAML login, logout, Single Logout, attribute mapping, on-the-fly creation, the `on_login` hook and the local Redmine password Sudo prompt are unchanged on every supported Redmine version.
+
+### Security
+
+- A Sudo re-authentication only succeeds when the pending transaction user, the signed-in Redmine user and the user resolved read-only from the SAML assertion are the same. A different IdP account fails the confirmation and never replaces the Redmine session.
+- The Sudo callback never calls `handle_active_user`, `logged_user=`, `reset_session`, `start_user_session`, `update_last_login_on!`, the SAML `on_login` hook or on-the-fly user creation. A successful transaction only refreshes the Sudo Mode timestamp.
+- A rejected transaction, including a replayed SAML Response, never falls back to the normal login path, never destroys the Redmine login session, and restores the SAML NameID and SessionIndex that were active before the transaction started.
+- Return URLs are validated with Redmine's own back URL validation when the transaction starts and again when it completes. Starting a transaction requires a CSRF token and a POST; the existing callback CSRF exemption was not widened.
+- The original request is not stored and not resubmitted after the IdP round trip.
+
 ## [1.1.1] - 2026-08-13
 
 ### Fixed

@@ -1,11 +1,19 @@
 es:
+  button_saml_sudo_reauth: Confirmar con SSO
   error_saml_authenticity_error: SAML authentication error
   error_saml_invalid_ticket: Invalid IDP cert fingerprint
+  error_saml_sudo_reauth_failed: Falló la confirmación con SSO. Inténtelo de nuevo.
+  error_saml_sudo_reauth_unavailable: La confirmación con SSO no está disponible para esta sesión.
   label_onthefly_creation: Crear usuarios automáticamente?
   label_replace_redmine_login: Reemplazar el login de Redmine
   label_saml_enabled: Habilitar autenticación SAML
   label_saml_login_label: Login page text
+  label_saml_sudo_reauth_required: Confirme su identidad para continuar
   label_saml_test_plural: Tests
   saml_login_label: Acceder usando SSO
   text_full_logout_proposal: Tal vez quiera %{value} antes de intentar con otro usuario
   text_logout_from_saml: cerrar su sesión SSO
+  text_saml_sudo_reauth_info: >-
+    Esta acción requiere que confirme su identidad. Ha accedido mediante SSO, por
+    lo que la confirmación la realiza su proveedor de identidad. Su sesión de
+    Redmine se mantiene y es posible que deba repetir la acción después.

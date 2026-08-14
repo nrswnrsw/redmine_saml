@@ -27,7 +27,14 @@ module RedmineSaml
     end
 
     def write_active(context)
-      write ACTIVE_NAME, SloContext.dump(context)
+      write_active_payload SloContext.dump(context)
+    end
+
+    # Writes an already serialized active context. Callers that must not
+    # serialize while they are committing state can prepare the payload first
+    # and only perform the cookie write here.
+    def write_active_payload(payload)
+      write ACTIVE_NAME, payload
     end
 
     def write_pending(context)
