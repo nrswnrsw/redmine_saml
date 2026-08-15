@@ -8,6 +8,7 @@ on:
     paths:
       - '.github/workflows/e2e.yml'
       - 'test/e2e/**'
+      - 'test/support/**'
       - 'app/**'
       - 'config/**'
       - 'lib/**'
@@ -20,6 +21,7 @@ on:
     paths:
       - '.github/workflows/e2e.yml'
       - 'test/e2e/**'
+      - 'test/support/**'
       - 'app/**'
       - 'config/**'
       - 'lib/**'
@@ -86,12 +88,30 @@ jobs:
           cp redmine/plugins/redmine_saml/test/support/database-postgres.yml \
              redmine/config/database.yml
 
-          cp redmine/plugins/redmine_saml/test/support/configuration.yml \
+          cp redmine/plugins/redmine_saml/test/support/configuration-e2e.yml \
              redmine/config/configuration.yml
 
           cat > redmine/config/initializers/saml_e2e_forgery_protection.rb <<'RUBY'
           Rails.application.config.after_initialize do
             ActionController::Base.allow_forgery_protection = true
+          end
+          RUBY
+
+          # Redmine's shortest configurable Sudo Mode window is one minute, so
+          # the browser test would have to wait a minute before the SAML
+          # confirmation prompt can appear. What the E2E verifies is the SAML
+          # round trip, not Redmine's timeout arithmetic, so the window is
+          # shortened here. This is E2E environment configuration only; it is
+          # never loaded by the plugin test suites.
+          cat > redmine/config/initializers/saml_e2e_sudo_mode.rb <<'RUBY'
+          Rails.application.config.after_initialize do
+            Redmine::SudoMode.singleton_class.prepend(
+              Module.new do
+                def timeout
+                  10.seconds
+                end
+              end
+            )
           end
           RUBY
 
@@ -262,6 +282,12 @@ jobs:
 
           bundle exec rails runner \
             "abort 'E2E forgery protection is disabled' unless ActionController::Base.allow_forgery_protection"
+
+          bundle exec rails runner \
+            "abort 'E2E Sudo Mode is disabled' unless Redmine::SudoMode.enabled?"
+
+          bundle exec rails runner \
+            "abort 'E2E Sudo Mode window was not shortened' unless Redmine::SudoMode.timeout <= 30.seconds"
 
       - name: Start Redmine
         working-directory: redmine

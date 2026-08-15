@@ -1,0 +1,13 @@
+# = Redmine configuration file for the SAML E2E environment
+#
+# Only the SAML E2E workflow uses this file. The plugin test suites keep using
+# test/support/configuration.yml, where Sudo Mode stays disabled, so enabling
+# it here cannot leak into them.
+#
+# The E2E workflow additionally shortens the Sudo Mode window, because the
+# shortest value Redmine accepts for sudo_mode_timeout is one minute and the
+# browser test would otherwise have to wait that long for the confirmation
+# prompt.
+
+default:
+  sudo_mode: true
