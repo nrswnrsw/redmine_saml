@@ -2,3 +2,6 @@ onthefly_creation: 0
 replace_redmine_login: 0
 saml_enabled: 1
 saml_login_label: ''
+saml_sudo_reauth_button_label: ''
+saml_sudo_reauth_text: ''
+saml_sudo_reauth_title: ''

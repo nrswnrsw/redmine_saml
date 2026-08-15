@@ -34,6 +34,22 @@ module RedmineSaml
       setting :saml_login_label
     end
 
+    # Optional administrator overrides for the SAML Sudo Mode confirmation
+    # prompt. Each one is blank by default, and the view then falls back to the
+    # translation of the current locale, so an unconfigured Redmine keeps the
+    # prompt it always had in every language.
+    def saml_sudo_reauth_title
+      setting :saml_sudo_reauth_title
+    end
+
+    def saml_sudo_reauth_text
+      setting :saml_sudo_reauth_text
+    end
+
+    def saml_sudo_reauth_button_label
+      setting :saml_sudo_reauth_button_label
+    end
+
     # These are intentionally explicit singleton-method wrappers.
     # rubocop:disable Rails/Delegate
     def user_attributes_from_saml(omniauth)

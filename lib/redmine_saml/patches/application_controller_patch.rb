@@ -8,6 +8,11 @@ module RedmineSaml
       extend ActiveSupport::Concern
 
       included do
+        # The Sudo Mode prompt is rendered from whatever controller asked for
+        # confirmation, so the display texts of that prompt are resolved by a
+        # helper of its own here. The login side keeps its own helper.
+        helper :omniauth_saml_sudo
+
         prepend InstanceOverwriteMethods
       end
 

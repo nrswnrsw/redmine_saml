@@ -4,6 +4,10 @@ This file records notable user-facing changes to the maintained `nrswnrsw/redmin
 
 ## [Unreleased]
 
+### Added
+
+- The heading, the explanation and the button label of the SAML Sudo Mode confirmation prompt can each be changed in the plugin settings (`saml_sudo_reauth_title`, `saml_sudo_reauth_text`, `saml_sudo_reauth_button_label`). All three are optional and blank by default, and each one falls back on its own to the existing translation of the current language, so an installation that configures none of them shows exactly the prompt of 1.2.0 in every language. The values are plain text and are escaped when the prompt is rendered. No initializer change, no new required setting, no database migration, and no change to SAML authentication, the Sudo transaction, the SAML callback or Single Logout.
+
 ## [1.2.0] - 2026-08-15
 
 ### Added

@@ -234,6 +234,22 @@ This behavior needs no configuration:
 - No new IdP configuration, no additional ACS URL and no additional SAML provider. The existing `/auth/saml/callback` endpoint is reused.
 - No database migration. The short-lived server-side record of a Sudo transaction uses Redmine's existing tokens table.
 
+Optional wording of the confirmation prompt:
+
+The three texts of the confirmation prompt can be changed in *Administration → Plugins → Redmine SAML*:
+
+| Setting | Plugin setting key | Prompt element |
+| --- | --- | --- |
+| Sudo Mode confirmation heading | `saml_sudo_reauth_title` | the heading of the prompt |
+| Sudo Mode confirmation text | `saml_sudo_reauth_text` | the explanation below the heading |
+| Sudo Mode confirmation button label | `saml_sudo_reauth_button_label` | the label of the confirmation button |
+
+All three are **optional** and blank by default:
+
+- **Leave a setting blank and the prompt keeps the default wording of the current language.** Each text falls back on its own, so configuring one of them does not change the other two, and an installation that configures none of them shows exactly the prompt it showed before these settings existed, in every language. No default wording is copied into the settings.
+- The values are **plain text**. HTML is not interpreted: it is escaped and shown as the characters that were entered.
+- This applies to the SAML confirmation prompt only, in both its page and modal form. The local Redmine password prompt and the SAML login page are unaffected.
+
 Details worth knowing:
 
 - The transaction only refreshes the Sudo Mode timestamp. It never signs the user in again: the Redmine session, its session token, the autologin cookie and `last_login_on` are untouched, and the SAML `on_login` hook and on-the-fly user creation do not run. A SAML identity the confirmation response does not carry is kept as it was, so a confirmation never degrades the NameID or SessionIndex of the session.
