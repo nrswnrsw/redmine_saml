@@ -220,11 +220,11 @@ Fingerprint-only configuration remains supported for existing deployments and no
 
 Do not configure `idp_cert`, `idp_cert_multi`, and `idp_cert_fingerprint` as simultaneous alternatives. The sample initializer uses `idp_cert` by default and shows the other approaches as commented alternatives.
 
-### Sudo Mode re-authentication (Redmine 7.0 and later)
+### Sudo Mode re-authentication
 
 Redmine's Sudo Mode asks for confirmation again before sensitive administrative actions once its timeout has passed. Redmine 7.0 enables Sudo Mode by default; on Redmine 6.0 and 6.1 it is only active when `sudo_mode: true` is set in `config/configuration.yml`.
 
-The Redmine confirmation prompt asks for the local Redmine password, which SAML-only users do not have. On **Redmine 7.0 and later**, this plugin therefore replaces that prompt with a SAML confirmation button whenever the current Redmine session was created by SAML. Pressing it sends a SAML `AuthnRequest` to the configured IdP and refreshes the Sudo Mode timestamp once the IdP confirms the same Redmine user.
+The Redmine confirmation prompt asks for the local Redmine password, which SAML-only users do not have. Whenever Sudo Mode is enabled and the current Redmine session was created by SAML, this plugin therefore replaces that prompt with a SAML confirmation button. This works the same way on every supported Redmine version; it follows Redmine's own Sudo Mode setting, not the Redmine version. Pressing it sends a SAML `AuthnRequest` to the configured IdP and refreshes the Sudo Mode timestamp once the IdP confirms the same Redmine user.
 
 That `AuthnRequest` is built from the SAML settings of your initializer, used unchanged. The plugin does not add or remove any authentication condition of its own, such as `ForceAuthn` or `IsPassive`. With a standard, static initializer that means the Sudo `AuthnRequest` carries the same authentication conditions as a normal SAML login: the same `ForceAuthn` and `IsPassive`, the same NameID policy and the same requested authentication context. If your deployment changes SAML settings per request through an OmniAuth `:setup` endpoint, see the known limitation below.
 
@@ -232,15 +232,17 @@ This behavior needs no configuration:
 
 - No new initializer setting and no change to an existing initializer.
 - No new IdP configuration, no additional ACS URL and no additional SAML provider. The existing `/auth/saml/callback` endpoint is reused.
-- No database migration.
+- No database migration. The short-lived server-side record of a Sudo transaction uses Redmine's existing tokens table.
 
 Details worth knowing:
 
-- The transaction only refreshes the Sudo Mode timestamp. It never signs the user in again: the Redmine session, its session token, the autologin cookie and `last_login_on` are untouched, and the SAML `on_login` hook and on-the-fly user creation do not run.
+- The transaction only refreshes the Sudo Mode timestamp. It never signs the user in again: the Redmine session, its session token, the autologin cookie and `last_login_on` are untouched, and the SAML `on_login` hook and on-the-fly user creation do not run. A SAML identity the confirmation response does not carry is kept as it was, so a confirmation never degrades the NameID or SessionIndex of the session.
+- A Sudo transaction is recorded server side for five minutes. While that record is valid, the SAML Response answering it is still recognised as a Sudo confirmation after the transaction was used or cancelled, and also in a browser session that never started it, so it is not processed as a normal SAML login. The record then expires; it is a short-lived identification of Sudo transactions, not a change to how SAML Responses are handled in general. Nothing about normal SAML login changes: a login response, including an IdP-initiated one without an `InResponseTo`, is handled exactly as before.
+- Starting a normal SAML login supersedes a pending Sudo confirmation of the same session, so the login completes normally.
 - The re-authentication only succeeds when the IdP returns the same Redmine user. If a different account is used at the IdP, the confirmation fails and the current Redmine session is kept as it is; it is never replaced by the other account.
 - The original request is not resubmitted after returning from the IdP. Redmine returns to a validated page and the action has to be repeated there.
 - A local Redmine login on a SAML-enabled Redmine keeps the standard Redmine password prompt.
-- On Redmine 6.0 and 6.1 this feature is not active at all, including when `sudo_mode: true` is configured. Sudo Mode behaves exactly as it does without this plugin.
+- While Sudo Mode is disabled, this feature is not active in any form: Redmine never asks for confirmation, no SAML confirmation transaction can be started, and nothing about SAML login, logout or Single Logout changes.
 
 Known limitation for request-scoped SAML configuration:
 

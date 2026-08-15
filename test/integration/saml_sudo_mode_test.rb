@@ -11,6 +11,10 @@ class SamlSudoModeTest < Redmine::IntegrationTest
 
   include RedmineSaml::TestHelper
 
+  # The request registry once evicted by count at five entries per user, which
+  # dropped entries that were still within REQUEST_VALIDITY.
+  PREVIOUS_COUNT_LIMIT = 5
+
   setup do
     prepare_tests
     Redmine::SudoMode.stubs(:enabled?).returns(true)
@@ -27,7 +31,6 @@ class SamlSudoModeTest < Redmine::IntegrationTest
   end
 
   test 'offers SAML re-authentication instead of the password prompt for a SAML session' do
-    skip_unless_sudo_supported
     saml_login
     expire_sudo_mode!
 
@@ -44,7 +47,6 @@ class SamlSudoModeTest < Redmine::IntegrationTest
   end
 
   test 'offers SAML re-authentication in the modal for an XHR request' do
-    skip_unless_sudo_supported
     saml_login
     expire_sudo_mode!
 
@@ -58,7 +60,6 @@ class SamlSudoModeTest < Redmine::IntegrationTest
   end
 
   test 'keeps the Redmine password prompt for a local login session' do
-    skip_unless_sudo_supported
     log_user 'admin', 'admin'
     expire_sudo_mode!
 
@@ -70,7 +71,6 @@ class SamlSudoModeTest < Redmine::IntegrationTest
   end
 
   test 'keeps the Redmine password prompt when the SAML plugin is disabled' do
-    skip_unless_sudo_supported
     saml_login
     change_saml_settings saml_enabled: 0
     expire_sudo_mode!
@@ -82,20 +82,26 @@ class SamlSudoModeTest < Redmine::IntegrationTest
     assert_select 'form#saml-sudo-reauth-form', 0
   end
 
-  test 'never changes the Sudo Mode prompt before Redmine 7.0' do
-    skip 'only relevant before Redmine 7.0' if RedmineSaml::SudoReauth.supported?
-    saml_login
-    expire_sudo_mode!
+  test 'never changes anything while Redmine Sudo Mode is off' do
+    with_sudo_mode_disabled do
+      saml_login
+      expire_sudo_mode!
 
-    post '/roles', params: { role: { name: 'a new role' } }
-
-    assert_response :success
-    assert_select 'input[name=sudo_password]'
-    assert_select 'form#saml-sudo-reauth-form', 0
+      # Redmine does not ask for confirmation at all with Sudo Mode off, so the
+      # protected action simply goes through.
+      assert_difference 'Role.count' do
+        post '/roles',
+             params: { role: { name: 'a new role',
+                               issues_visibility: 'all',
+                               assignable: '1',
+                               permissions: %w[view_calendar] } }
+      end
+      assert_redirected_to '/roles'
+      assert_select 'form#saml-sudo-reauth-form', 0
+    end
   end
 
   test 'completes a full SAML sudo re-authentication round trip' do
-    skip_unless_sudo_supported
     saml_login
     expire_sudo_mode!
 
@@ -127,7 +133,6 @@ class SamlSudoModeTest < Redmine::IntegrationTest
   end
 
   test 'never reaches the normal login path when a sudo response is replayed' do
-    skip_unless_sudo_supported
     saml_login
     session_user_id = session[:user_id]
     expire_sudo_mode!
@@ -146,7 +151,6 @@ class SamlSudoModeTest < Redmine::IntegrationTest
   end
 
   test 'does not route a normal SAML login callback into the sudo handler' do
-    skip_unless_sudo_supported
     saml_login
     expire_sudo_mode!
 
@@ -175,7 +179,6 @@ class SamlSudoModeTest < Redmine::IntegrationTest
   # session['saml_uid'] and session['saml_session_index'].
 
   test 'fails a Sudo marker without a transaction closed before the callback phase' do
-    skip_unless_sudo_supported
     saml_login
     expire_sudo_mode!
 
@@ -191,7 +194,6 @@ class SamlSudoModeTest < Redmine::IntegrationTest
   end
 
   test 'fails a replayed Sudo response closed before the callback phase' do
-    skip_unless_sudo_supported
     saml_login
     expire_sudo_mode!
 
@@ -210,7 +212,6 @@ class SamlSudoModeTest < Redmine::IntegrationTest
   end
 
   test 'fails an expired Sudo transaction closed before the callback phase' do
-    skip_unless_sudo_supported
     saml_login
     expire_sudo_mode!
 
@@ -232,7 +233,6 @@ class SamlSudoModeTest < Redmine::IntegrationTest
   # so that case is covered by SudoReauthTest at the setup endpoint itself. Here
   # only the outcome of a Sudo marker without a usable transaction is asserted.
   test 'fails a Sudo marker with an unusable transaction closed' do
-    skip_unless_sudo_supported
     saml_login
     expire_sudo_mode!
 
@@ -247,8 +247,6 @@ class SamlSudoModeTest < Redmine::IntegrationTest
   end
 
   test 'never fail-closes a normal SAML login callback in the setup endpoint' do
-    skip_unless_sudo_supported
-
     with_omniauth_production_mode do
       post RedmineSaml::CALLBACK_PATH, params: { SAMLResponse: 'not-a-saml-response' }
     end
@@ -261,7 +259,6 @@ class SamlSudoModeTest < Redmine::IntegrationTest
   end
 
   test 'keeps treating a callback as Sudo when the RelayState was stripped' do
-    skip_unless_sudo_supported
     saml_login
     expire_sudo_mode!
 
@@ -279,7 +276,6 @@ class SamlSudoModeTest < Redmine::IntegrationTest
   end
 
   test 'leaves the metadata and Single Logout endpoints untouched' do
-    skip_unless_sudo_supported
     saml_login
     expire_sudo_mode!
 
@@ -297,10 +293,12 @@ class SamlSudoModeTest < Redmine::IntegrationTest
 
     # The pending transaction is untouched by those endpoints.
     assert_equal users(:users_001).id, session[:user_id]
+    assert session[RedmineSaml::SudoReauth::SESSION_KEY].present?
+    assert_equal 1, Token.where(action: RedmineSaml::SudoTokenStore::ACTION).count
+    assert_equal 1, Token.where(action: RedmineSaml::SudoTokenStore::REQUEST_ACTION).count
   end
 
   test 'asks the IdP for the same authentication conditions as the real login request phase' do
-    skip_unless_sudo_supported
     saml_login
     expire_sudo_mode!
 
@@ -326,25 +324,240 @@ class SamlSudoModeTest < Redmine::IntegrationTest
                      'the Sudo transaction must still use its own AuthnRequest ID'
   end
 
-  test 'never fail-closes anything before Redmine 7.0' do
-    skip 'only relevant before Redmine 7.0' if RedmineSaml::SudoReauth.supported?
-    saml_login
+  test 'never fail-closes anything while Redmine Sudo Mode is off' do
+    with_sudo_mode_disabled do
+      saml_login
 
-    with_omniauth_production_mode do
-      post RedmineSaml::CALLBACK_PATH,
-           params: { SAMLResponse: 'not-a-saml-response',
-                     RelayState: RedmineSaml::SudoReauth.relay_state('deadbeefdeadbeefdeadbeefdeadbeef') }
+      with_omniauth_production_mode do
+        post RedmineSaml::CALLBACK_PATH,
+             params: { SAMLResponse: 'not-a-saml-response',
+                       RelayState: RedmineSaml::SudoReauth.relay_state('deadbeefdeadbeefdeadbeefdeadbeef') }
+      end
+
+      assert_not_equal RedmineSaml::SudoReauth::FAILURE_MESSAGE, saml_failure_message,
+                       'the Sudo setup_phase extension must be a complete no-op with Sudo Mode off'
+      assert_includes saml_failure_message, 'Malformed XML'
     end
+  end
 
-    assert_not_equal RedmineSaml::SudoReauth::FAILURE_MESSAGE, saml_failure_message,
-                     'the setup endpoint must be a complete no-op before Redmine 7.0'
-    assert_includes saml_failure_message, 'Malformed XML'
+  # ---------------------------------------------------------------------------
+  # Sudo request registry, against real signed SAML Responses
+  # ---------------------------------------------------------------------------
+  #
+  # OmniAuth test mode replaces the whole callback phase, so it can never show
+  # what ruby-saml does with a Response, and in particular not that a Response
+  # without a RelayState is still recognised as a Sudo one. These run the real
+  # middleware lifecycle with Responses signed by a throwaway IdP key.
+
+  test 'never processes a consumed sudo Response as a normal login' do
+    with_real_saml_responses do
+      real_saml_login
+      expire_sudo_mode!
+      transaction = start_real_sudo_transaction
+
+      post RedmineSaml::CALLBACK_PATH,
+           params: { SAMLResponse: transaction[:response], RelayState: transaction[:relay_state] }
+      assert_redirected_to '/roles'
+      assert_nil session[RedmineSaml::SudoReauth::SESSION_KEY]
+      assert_equal 0, Token.where(action: RedmineSaml::SudoTokenStore::ACTION).count
+      last_login_on = users(:users_001).reload.last_login_on
+
+      # Replayed with the RelayState dropped, so nothing but the server side
+      # request registry can still recognise it as a Sudo Response.
+      post RedmineSaml::CALLBACK_PATH, params: { SAMLResponse: transaction[:response] }
+
+      assert_equal RedmineSaml::SudoReauth::FAILURE_MESSAGE, saml_failure_message
+      assert_saml_login_session_intact
+      assert_equal last_login_on, users(:users_001).reload.last_login_on,
+                   'the normal login path must not have run'
+    end
+  end
+
+  test 'still identifies the first sudo Response after many transactions of the same user' do
+    with_real_saml_responses do
+      real_saml_login
+      expire_sudo_mode!
+
+      # The registry once evicted by count at five entries per user, which
+      # dropped the first transaction here and let its Response through as a
+      # normal login. Every entry is still within REQUEST_VALIDITY.
+      transactions = Array.new(PREVIOUS_COUNT_LIMIT + 3) { start_real_sudo_transaction }
+
+      transactions.each do |transaction|
+        assert RedmineSaml::SudoTokenStore.request_registered?(transaction[:request_id]),
+               "#{transaction[:request_id]} was dropped although it is still within REQUEST_VALIDITY"
+      end
+
+      # Posted from a browser session that holds no Sudo state at all, so only
+      # the request registry can classify it.
+      other_browser = open_session
+      other_browser.post RedmineSaml::CALLBACK_PATH, params: { SAMLResponse: transactions.first[:response] }
+
+      assert_equal RedmineSaml::SudoReauth::FAILURE_MESSAGE,
+                   saml_failure_message(other_browser.response)
+      assert_nil other_browser.session[:user_id]
+      assert_equal transactions.size,
+                   Token.where(action: RedmineSaml::SudoTokenStore::REQUEST_ACTION).count
+      assert_saml_login_session_intact
+    end
+  end
+
+  test 'never processes a sudo Response as a normal login in another browser session' do
+    with_real_saml_responses do
+      real_saml_login
+      expire_sudo_mode!
+      transaction = start_real_sudo_transaction
+
+      # The transaction is never completed here. The Response is posted from a
+      # browser session that never knew about it and holds no Sudo state.
+      other_browser = open_session
+      other_browser.post RedmineSaml::CALLBACK_PATH, params: { SAMLResponse: transaction[:response] }
+
+      assert_equal RedmineSaml::SudoReauth::FAILURE_MESSAGE,
+                   saml_failure_message(other_browser.response)
+      assert_nil other_browser.session[:user_id]
+      assert_saml_login_session_intact
+    end
+  end
+
+  test 'keeps a pending transaction a sudo callback without the request registry' do
+    with_real_saml_responses do
+      real_saml_login
+      expire_sudo_mode!
+      transaction = start_real_sudo_transaction
+      Token.where(action: RedmineSaml::SudoTokenStore::REQUEST_ACTION).delete_all
+
+      post RedmineSaml::CALLBACK_PATH, params: { SAMLResponse: transaction[:response] }
+
+      assert_response :redirect
+      assert_not_equal '/my/page', URI.parse(response.location).path,
+                       'the session signal alone has to keep this out of the normal login'
+      assert flash[:error].present?
+      assert_saml_login_session_intact
+    end
+  end
+
+  test 'cancels a pending sudo transaction when a normal SAML login request starts' do
+    with_real_saml_responses do
+      real_saml_login
+      expire_sudo_mode!
+      post '/saml/sudo_reauth', params: { back_url: '/roles' }
+      assert_response :redirect
+      assert session[RedmineSaml::SudoReauth::SESSION_KEY].present?
+      assert_equal 1, Token.where(action: RedmineSaml::SudoTokenStore::ACTION).count
+
+      # The OmniAuth request phase, reached without the Rails GET bridge.
+      post '/auth/saml'
+      assert_response :redirect
+      assert_nil session[RedmineSaml::SudoReauth::SESSION_KEY]
+      assert_equal 0, Token.where(action: RedmineSaml::SudoTokenStore::ACTION).count
+      assert_equal 1, Token.where(action: RedmineSaml::SudoTokenStore::REQUEST_ACTION).count,
+                   'the request registry entry has to outlive the cancellation'
+
+      post RedmineSaml::CALLBACK_PATH,
+           params: { SAMLResponse: signed_response(in_response_to: authn_request_id_from(response.location)) }
+
+      assert_redirected_to '/my/page'
+      assert_equal users(:users_001).id, session[:user_id]
+      assert session[:logged_in_with_saml]
+    end
+  end
+
+  test 'keeps the SAML identity and the active SLO cookie consistent without a new NameID' do
+    with_real_saml_responses do
+      https!
+      real_saml_login
+      assert cookies[RedmineSaml::SloCookie::ACTIVE_NAME].present?
+      expire_sudo_mode!
+
+      transaction = start_real_sudo_transaction name_id: nil
+      post RedmineSaml::CALLBACK_PATH,
+           params: { SAMLResponse: transaction[:response], RelayState: transaction[:relay_state] }
+
+      assert_redirected_to '/roles'
+      assert_nil flash[:error]
+      assert_equal RedmineSaml::SamlResponseBuilder::NAME_ID, session['saml_uid'],
+                   'a successful sudo re-authentication must not erase the SAML identity'
+      assert cookies[RedmineSaml::SloCookie::ACTIVE_NAME].present?
+    end
+  end
+
+  test 'keeps the SessionIndex of the session when the sudo Response carries none' do
+    with_real_saml_responses do
+      real_saml_login
+      expire_sudo_mode!
+
+      transaction = start_real_sudo_transaction session_index: nil, name_id: 'refreshed-name-id'
+      post RedmineSaml::CALLBACK_PATH,
+           params: { SAMLResponse: transaction[:response], RelayState: transaction[:relay_state] }
+
+      assert_redirected_to '/roles'
+      assert_equal 'refreshed-name-id', session['saml_uid']
+      assert_equal RedmineSaml::SamlResponseBuilder::SESSION_INDEX, session['saml_session_index']
+    end
+  end
+
+  # These two hold on every supported Redmine release: before 7.0 nothing of
+  # the Sudo machinery exists, and from 7.0 it must not touch a normal login.
+
+  test 'still completes a normal SP initiated SAML login' do
+    with_real_saml_responses do
+      get '/auth/saml'
+      assert_response :success
+      post '/auth/saml', params: { authenticity_token: bridge_authenticity_token }
+      assert_response :redirect
+
+      post RedmineSaml::CALLBACK_PATH,
+           params: { SAMLResponse: signed_response(in_response_to: authn_request_id_from(response.location)) }
+
+      assert_redirected_to '/my/page'
+      assert_equal users(:users_001).id, session[:user_id]
+      assert session[:logged_in_with_saml]
+    end
+  end
+
+  test 'still completes an IdP initiated SAML login while a sudo transaction exists' do
+    with_real_saml_responses do
+      real_saml_login
+      expire_sudo_mode!
+      start_real_sudo_transaction
+      assert_equal 1, Token.where(action: RedmineSaml::SudoTokenStore::REQUEST_ACTION).count
+      reset!
+
+      # No InResponseTo at all, so the request registry can never match.
+      post RedmineSaml::CALLBACK_PATH, params: { SAMLResponse: signed_response }
+
+      assert_redirected_to '/my/page'
+      assert_equal users(:users_001).id, session[:user_id]
+      assert session[:logged_in_with_saml]
+    end
+  end
+
+  test 'never records a sudo request registry entry while Sudo Mode is off' do
+    with_sudo_mode_disabled do
+      with_real_saml_responses do
+        real_saml_login
+
+        post '/saml/sudo_reauth', params: { back_url: '/roles' }
+        assert_response :forbidden
+
+        post '/auth/saml'
+        assert_response :redirect
+
+        assert_equal 0, Token.where(action: RedmineSaml::SudoTokenStore::REQUEST_ACTION).count
+        assert_equal 0, Token.where(action: RedmineSaml::SudoTokenStore::ACTION).count
+      end
+    end
   end
 
   private
 
-  def skip_unless_sudo_supported
-    skip 'SAML sudo re-authentication requires Redmine 7.0' unless RedmineSaml::SudoReauth.supported?
+  # Redmine reads sudo_mode once at boot, so the setup block turns it on for
+  # this whole test case and this turns it off again for a single test.
+  def with_sudo_mode_disabled
+    Redmine::SudoMode.unstub :enabled?
+    Redmine::SudoMode.stubs(:enabled?).returns false
+    yield
   end
 
   def with_omniauth_production_mode
@@ -355,9 +568,9 @@ class SamlSudoModeTest < Redmine::IntegrationTest
     OmniAuth.config.test_mode = original_test_mode
   end
 
-  def saml_failure_message
-    assert_response :redirect
-    failure_uri = URI.parse response.location
+  def saml_failure_message(saml_response = response)
+    assert_equal 302, saml_response.status
+    failure_uri = URI.parse saml_response.location
     assert_equal '/auth/failure', failure_uri.path
     Rack::Utils.parse_query(failure_uri.query.to_s)['message']
   end
@@ -374,6 +587,33 @@ class SamlSudoModeTest < Redmine::IntegrationTest
     assert session[:logged_in_with_saml]
   end
 
+  # An IdP initiated login with a real, signed Response.
+  def real_saml_login
+    post RedmineSaml::CALLBACK_PATH, params: { SAMLResponse: signed_response }
+    assert_redirected_to '/my/page'
+    assert_equal users(:users_001).id, session[:user_id]
+    assert session[:logged_in_with_saml]
+  end
+
+  def signed_response(**options)
+    RedmineSaml::SamlResponseBuilder.encoded(**options)
+  end
+
+  # Starts a Sudo transaction and builds the Response the IdP would send back
+  # for exactly that AuthnRequest.
+  def start_real_sudo_transaction(back_url: '/roles', **response_options)
+    post '/saml/sudo_reauth', params: { back_url: back_url }
+    assert_response :redirect
+    request_id = authn_request_id_from response.location
+    relay_state = relay_state_from response.location
+    assert request_id.present?
+    assert relay_state.present?
+
+    { request_id: request_id,
+      relay_state: relay_state,
+      response: signed_response(in_response_to: request_id, **response_options) }
+  end
+
   # Sudo Mode is active right after signing in; let it expire.
   def expire_sudo_mode!
     travel_to 20.minutes.from_now
@@ -386,6 +626,10 @@ class SamlSudoModeTest < Redmine::IntegrationTest
 
   def bridge_authenticity_token
     css_select('#saml-request-form input[name=authenticity_token]').first&.[]('value')
+  end
+
+  def authn_request_id_from(location)
+    authn_request_from(location)&.attributes&.[]('ID')
   end
 
   def authn_request_from(location)

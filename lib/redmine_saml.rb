@@ -55,11 +55,8 @@ module RedmineSaml
       # Patches
       patches = %w[User
                    AccountController
-                   SettingsController]
-      # SAML Sudo Mode re-authentication is a Redmine 7.0+ feature. On older
-      # releases the ApplicationController patch is not applied at all, so
-      # Sudo Mode keeps its unmodified Redmine behaviour there.
-      patches << 'ApplicationController' if SudoReauth.supported?
+                   SettingsController
+                   ApplicationController]
       loader.add_patch patches
 
       # Apply patches and helper
@@ -67,13 +64,12 @@ module RedmineSaml
 
       SloTokenStore.register_action!
 
-      # Runs after every plugin is loaded, which is the first point where
-      # Redmine::VERSION is available, so Redmine 6.0 and 6.1 get neither the
-      # Token action nor the OmniAuth setup_phase extension.
-      if SudoReauth.supported?
-        SudoTokenStore.register_action!
-        SudoReauth.install_setup_phase!
-      end
+      # SAML Sudo Mode re-authentication is installed on every supported
+      # Redmine release and gated at request time by Redmine's own Sudo Mode,
+      # exactly as Redmine gates its Sudo Mode controller hooks. While Sudo
+      # Mode is off, both entry points below return immediately.
+      SudoTokenStore.register_action!
+      SudoReauth.install_setup_phase!
 
       # Load view hooks
       loader.load_view_hooks!

@@ -38,52 +38,66 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   # ---------------------------------------------------------------------------
-  # Redmine 6.0 / 6.1 non-regression
+  # Sudo Mode disabled non-regression
   # ---------------------------------------------------------------------------
+  #
+  # SAML Sudo re-authentication exists on every supported Redmine release and
+  # is gated by Redmine's own Sudo Mode. With Sudo Mode off, Redmine never asks
+  # for confirmation in the first place and nothing of this feature may run.
 
-  test 'refuses to start a SAML sudo transaction on Redmine 6.x' do
-    skip 'only relevant before Redmine 7.0' if sudo_supported?
+  test 'refuses to start a SAML sudo transaction while Sudo Mode is off' do
+    with_sudo_mode_disabled do
+      establish_saml_session
 
-    establish_saml_session
+      assert_no_difference 'Token.where(action: RedmineSaml::SudoTokenStore::ACTION).count' do
+        post :saml_sudo_reauth, params: { back_url: '/projects' }
+      end
 
-    assert_no_difference 'Token.where(action: RedmineSaml::SudoTokenStore::ACTION).count' do
-      post :saml_sudo_reauth, params: { back_url: '/projects' }
+      assert_response :forbidden
+      assert_nil session[RedmineSaml::SudoReauth::SESSION_KEY]
+      assert_saml_login_session_intact
     end
-
-    assert_response :forbidden
-    assert_nil session[RedmineSaml::SudoReauth::SESSION_KEY]
-    assert_saml_login_session_intact
   end
 
-  test 'never branches a SAML callback into the sudo handler on Redmine 6.x' do
-    skip 'only relevant before Redmine 7.0' if sudo_supported?
+  test 'never branches a SAML callback into the sudo handler while Sudo Mode is off' do
+    with_sudo_mode_disabled do
+      establish_saml_session
+      request.env['omniauth.auth'] = { 'saml_login' => @user.login }
+      request.env[RedmineSaml::SudoReauth::ENV_CALLBACK] = true
 
-    establish_saml_session
-    request.env['omniauth.auth'] = { 'saml_login' => @user.login }
+      post :login_with_saml_callback,
+           params: { provider: 'saml', RelayState: RedmineSaml::SudoReauth.relay_state('deadbeef') }
 
-    post :login_with_saml_callback,
-         params: { provider: 'saml', RelayState: RedmineSaml::SudoReauth.relay_state('deadbeef') }
-
-    # The normal login path ran, exactly as before this feature existed.
-    assert_redirected_to '/my/page'
-    assert_equal @user.id, session[:user_id]
-    assert session[:logged_in_with_saml]
+      # The normal login path ran, exactly as before this feature existed.
+      assert_redirected_to '/my/page'
+      assert_equal @user.id, session[:user_id]
+      assert session[:logged_in_with_saml]
+    end
   end
 
-  test 'keeps the sudo feature switched off on Redmine 6.x even with sudo_mode enabled' do
-    skip 'only relevant before Redmine 7.0' if sudo_supported?
+  test 'keeps the whole sudo machinery switched off while Sudo Mode is off' do
+    with_sudo_mode_disabled do
+      establish_saml_session
 
-    establish_saml_session
+      assert_not RedmineSaml::SudoReauth.enabled?
+      assert_not RedmineSaml::SudoReauth.available?(session: session)
+      assert_not RedmineSaml::SudoReauth.pending?(session: session)
+      assert_not RedmineSaml::SudoReauth.callback?(
+        env: { RedmineSaml::SudoReauth::ENV_CALLBACK => true },
+        session: { RedmineSaml::SudoReauth::SESSION_KEY => { 'type' => 'sudo' } }
+      )
+      RedmineSaml::SudoReauth.process_setup_phase 'omniauth.strategy' => nil, 'rack.session' => session
 
-    assert_not RedmineSaml::SudoReauth.supported?
-    assert_not RedmineSaml::SudoReauth.available?(session: session)
-    assert_not RedmineSaml::SudoReauth.pending?(session: session)
-    assert_not RedmineSaml::SudoReauth.callback?(session: session,
-                                                 relay_state: RedmineSaml::SudoReauth.relay_state('deadbeef'))
-    assert_not AccountController.method_defined?(:render_sudo_form_without_saml),
-               'the plugin must not alias Redmine Sudo Mode methods'
-    assert_not ApplicationController <= RedmineSaml::Patches::ApplicationControllerPatch,
-               'the ApplicationController patch must not be applied before Redmine 7.0'
+      assert_equal 0, Token.where(action: RedmineSaml::SudoTokenStore::REQUEST_ACTION).count
+      assert_not AccountController.method_defined?(:render_sudo_form_without_saml),
+                 'the plugin must not alias Redmine Sudo Mode methods'
+    end
+  end
+
+  test 'installs the Sudo Mode prompt override on every supported Redmine release' do
+    assert ApplicationController <= RedmineSaml::Patches::ApplicationControllerPatch
+    assert RedmineSaml::SudoReauth.enabled?,
+           'the feature follows Redmine Sudo Mode, not the Redmine version'
   end
 
   # ---------------------------------------------------------------------------
@@ -91,7 +105,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   # ---------------------------------------------------------------------------
 
   test 'starts a Sudo AuthnRequest with its own ID and stores the transaction' do
-    skip_unless_sudo_supported
     establish_saml_session
 
     transaction = start_sudo_transaction back_url: '/projects'
@@ -108,7 +121,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'asks the IdP for the same authentication conditions as a normal login' do
-    skip_unless_sudo_supported
     establish_saml_session
 
     sudo_request = start_sudo_transaction[:authn_request]
@@ -119,7 +131,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'never sets ForceAuthn or IsPassive on either AuthnRequest' do
-    skip_unless_sudo_supported
     establish_saml_session
 
     sudo_request = start_sudo_transaction[:authn_request]
@@ -131,7 +142,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'does not modify the configured SAML settings while starting a transaction' do
-    skip_unless_sudo_supported
     establish_saml_session
     settings_before = RedmineSaml.configured_saml.deep_dup
 
@@ -141,7 +151,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'snapshots the SAML session identifiers when the transaction starts' do
-    skip_unless_sudo_supported
     establish_saml_session
 
     context = start_sudo_transaction[:context]
@@ -151,7 +160,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'never trusts an unsafe return URL when starting a transaction' do
-    skip_unless_sudo_supported
     establish_saml_session
 
     transaction = start_sudo_transaction back_url: 'https://attacker.example/steal'
@@ -160,7 +168,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'rejects a sudo transaction start without a CSRF token' do
-    skip_unless_sudo_supported
     establish_saml_session
 
     with_forgery_protection do
@@ -176,8 +183,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'has no GET route for the sudo transaction start' do
-    skip_unless_sudo_supported
-
     assert_raise ActionController::RoutingError do
       Rails.application.routes.recognize_path '/saml/sudo_reauth', method: :get
     end
@@ -187,7 +192,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'refuses to start a sudo transaction for a local login session' do
-    skip_unless_sudo_supported
     establish_local_session
 
     assert_no_difference 'Token.where(action: RedmineSaml::SudoTokenStore::ACTION).count' do
@@ -200,7 +204,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'refuses to start a sudo transaction when SAML is disabled or nobody is signed in' do
-    skip_unless_sudo_supported
     establish_saml_session
     change_saml_settings saml_enabled: 0
 
@@ -218,7 +221,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   # ---------------------------------------------------------------------------
 
   test 'refreshes only the sudo timestamp and returns to the safe URL' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction back_url: '/projects'
     session_user_id = session[:user_id]
@@ -242,7 +244,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'never runs the normal login hooks during a sudo callback' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     hook_calls = 0
@@ -262,7 +263,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'never creates a user on the fly during a sudo callback' do
-    skip_unless_sudo_supported
     change_saml_settings onthefly_creation: 1
     establish_saml_session
     transaction = start_sudo_transaction
@@ -278,7 +278,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'adopts the new NameID and SessionIndex and reissues the SLO context' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     calls = count_controller_calls :build_active_slo_context, :commit_saml_sudo_reauth
@@ -294,12 +293,75 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
     assert_equal '_refreshed-session-index', session['saml_session_index']
   end
 
+  test 'keeps the previous NameID when the sudo Response carries none' do
+    establish_saml_session
+    transaction = start_sudo_transaction
+
+    post_sudo_callback transaction, saml_uid: nil, saml_session_index: '_refreshed-session-index'
+
+    assert_response :redirect
+    assert_nil flash[:error]
+    assert_equal 'current-name-id', session['saml_uid'],
+                 'a successful sudo re-authentication must not erase the SAML identity'
+    assert_equal '_refreshed-session-index', session['saml_session_index']
+  end
+
+  test 'keeps the previous SessionIndex when the sudo Response carries none' do
+    establish_saml_session
+    transaction = start_sudo_transaction
+
+    post_sudo_callback transaction, saml_uid: 'refreshed-name-id', saml_session_index: nil
+
+    assert_response :redirect
+    assert_nil flash[:error]
+    assert_equal 'refreshed-name-id', session['saml_uid']
+    assert_equal '_current-session-index', session['saml_session_index']
+  end
+
+  test 'keeps a session without SAML identifiers free of them' do
+    establish_saml_session saml_uid: nil, saml_session_index: nil
+    transaction = start_sudo_transaction
+
+    post_sudo_callback transaction, saml_uid: nil, saml_session_index: nil
+
+    assert_response :redirect
+    assert_nil flash[:error]
+    assert_not session.key?('saml_uid')
+    assert_not session.key?('saml_session_index')
+  end
+
+  test 'builds the active SLO context from the identity the session keeps' do
+    establish_saml_session
+    transaction = start_sudo_transaction
+    captured = capture_slo_context_arguments
+
+    post_sudo_callback transaction, saml_uid: nil, saml_session_index: nil
+
+    assert_response :redirect
+    assert_equal 1, captured.size
+    assert_equal 'current-name-id', captured.first[:name_id]
+    assert_equal '_current-session-index', captured.first[:session_index]
+    assert_equal session['saml_uid'], captured.first[:name_id],
+                 'the SLO context and the live session must describe the same identity'
+    assert_equal session['saml_session_index'], captured.first[:session_index]
+  end
+
+  test 'restores the previous identity when a sudo callback is rejected' do
+    establish_saml_session
+    transaction = start_sudo_transaction
+
+    post_sudo_callback transaction, relay_state: 'not-a-sudo-relay-state', saml_uid: nil
+
+    assert_sudo_rejected
+    assert_equal 'current-name-id', session['saml_uid']
+    assert_equal '_current-session-index', session['saml_session_index']
+  end
+
   # ---------------------------------------------------------------------------
   # Success boundary
   # ---------------------------------------------------------------------------
 
   test 'does not grant Sudo Mode when building the SLO context fails' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     session[:sudo_timestamp] = 1
@@ -324,7 +386,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'does not grant Sudo Mode when an unexpected error breaks the preparation' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     session[:sudo_timestamp] = 1
@@ -344,7 +405,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'serializes the SLO context during the preparation, not during the commit' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     dumped_during_commit = false
@@ -361,7 +421,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'requires the pre-overwrite snapshot before it commits' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     session[:sudo_timestamp] = 1
@@ -378,7 +437,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'rolls the SAML identifiers back when the SLO cookie write fails' do
-    skip_unless_sudo_supported
     establish_saml_session
     @request.env['HTTPS'] = 'on'
     transaction = start_sudo_transaction
@@ -407,7 +465,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'writes the new SLO context and refreshes the timestamp on success over ssl' do
-    skip_unless_sudo_supported
     establish_saml_session
     @request.env['HTTPS'] = 'on'
     transaction = start_sudo_transaction
@@ -430,7 +487,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'never rolls back after the success commit' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     session[:sudo_timestamp] = 1
@@ -459,7 +515,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'refreshes the Sudo timestamp on a normal successful transaction' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     session[:sudo_timestamp] = 1
@@ -474,7 +529,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'succeeds when a transient NameID changed but the Redmine user did not' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     started_at = Time.now.to_i
@@ -491,7 +545,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   # ---------------------------------------------------------------------------
 
   test 'rejects a sudo callback whose InResponseTo was not validated' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
 
@@ -501,7 +554,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'rejects a sudo callback with a mismatched InResponseTo' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
 
@@ -511,7 +563,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'rejects a sudo callback with a mismatched or missing RelayState nonce' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
 
@@ -527,7 +578,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'rejects a sudo callback after the transaction expired' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     expire_sudo_transaction transaction
@@ -538,7 +588,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'rejects a replayed sudo SAML Response without falling back to the normal login' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     post_sudo_callback transaction
@@ -548,9 +597,11 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
     last_login_on = @user.reload.last_login_on
     calls = count_controller_calls :handle_active_user, :successful_authentication
 
-    # The session state is gone, but the RelayState marker still routes the
-    # replay into the Sudo handler instead of the normal login path.
-    post_sudo_callback transaction
+    # The session state is gone, but the setup phase verdict still routes the
+    # replay into the Sudo handler instead of the normal login path, whether
+    # it reached that verdict from the RelayState marker or from the request
+    # registry.
+    post_sudo_callback transaction, relay_state: nil
 
     assert_sudo_rejected
     assert_equal 0, calls[:handle_active_user]
@@ -561,7 +612,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'lets only one of two sudo callbacks for the same transaction succeed' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
 
@@ -577,7 +627,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'rejects a sudo callback for a different Redmine user without replacing the session' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
 
@@ -589,7 +638,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'rejects a sudo callback for an unresolvable or locked user' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     post_sudo_callback transaction, auth: { 'saml_login' => 'no-such-saml-user' }
@@ -604,7 +652,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'restores the SAML session snapshot when a sudo callback is rejected' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     calls = count_controller_calls :build_active_slo_context, :commit_saml_sudo_reauth
@@ -622,7 +669,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'prefers the request env snapshot over the transaction snapshot when restoring' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
 
@@ -643,7 +689,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'removes the SAML session identifiers when the request env snapshot was empty' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
 
@@ -662,7 +707,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'keeps the new identifiers on success and never restores the env snapshot' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
 
@@ -681,7 +725,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'deletes the SAML session identifiers again when the snapshot was empty' do
-    skip_unless_sudo_supported
     establish_saml_session saml_uid: nil, saml_session_index: nil
     transaction = start_sudo_transaction
 
@@ -696,7 +739,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'never destroys the Redmine login session when a sudo callback is rejected' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     session_user_id = session[:user_id]
@@ -714,7 +756,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'never returns to an unsafe URL after a rejected sudo callback' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     tampered = transaction[:context].merge 'return_url' => 'https://attacker.example/steal'
@@ -730,7 +771,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   # ---------------------------------------------------------------------------
 
   test 'handles a SAML validation failure of a pending sudo transaction' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
     session['saml_uid'] = 'foreign-name-id'
@@ -750,7 +790,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'recognises the setup endpoint failure message without any pending transaction' do
-    skip_unless_sudo_supported
     establish_saml_session
     session_user_id = session[:user_id]
     session_token = session[:tk]
@@ -772,8 +811,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'keeps the existing /auth/failure behaviour without a pending sudo transaction' do
-    skip_unless_sudo_supported
-
     get :login_with_saml_failure, params: { message: 'invalid_ticket' }
 
     assert_redirected_to '/login'
@@ -785,7 +822,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   # ---------------------------------------------------------------------------
 
   test 'cancels a pending sudo transaction when a normal SAML login starts' do
-    skip_unless_sudo_supported
     establish_saml_session
     transaction = start_sudo_transaction
 
@@ -797,7 +833,6 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   test 'keeps a normal SAML login callback on the normal login path' do
-    skip_unless_sudo_supported
     establish_saml_session
     request.env['omniauth.auth'] = { 'saml_login' => @user.login }
 
@@ -811,8 +846,12 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
 
   private
 
-  def sudo_supported?
-    RedmineSaml::SudoReauth.supported?
+  # Redmine reads sudo_mode once at boot, so the setup block turns it on for
+  # this whole test case and this turns it off again for a single test.
+  def with_sudo_mode_disabled
+    Redmine::SudoMode.unstub :enabled?
+    Redmine::SudoMode.stubs(:enabled?).returns false
+    yield
   end
 
   # Counts calls to controller methods during the following requests.
@@ -825,16 +864,24 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
     counts = Hash.new 0
     method_names.each do |method_name|
       original = @controller.method method_name
-      @controller.define_singleton_method method_name do |*args, &block|
+      @controller.define_singleton_method method_name do |*args, **kwargs, &block|
         counts[method_name] += 1
-        original.call(*args, &block)
+        original.call(*args, **kwargs, &block)
       end
     end
     counts
   end
 
-  def skip_unless_sudo_supported
-    skip 'SAML sudo re-authentication requires Redmine 7.0' unless sudo_supported?
+  # Records the NameID and SessionIndex the controller builds the active SLO
+  # context from, so it can be compared with what the session keeps.
+  def capture_slo_context_arguments
+    captured = []
+    original = @controller.method :build_active_slo_context
+    @controller.define_singleton_method :build_active_slo_context do |**kwargs|
+      captured << { name_id: kwargs.fetch(:name_id), session_index: kwargs.fetch(:session_index) }
+      original.call(**kwargs)
+    end
+    captured
   end
 
   def establish_saml_session(user: @user, saml_uid: 'current-name-id', saml_session_index: '_current-session-index')
@@ -874,11 +921,16 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
   end
 
   def post_sudo_callback(transaction, auth: { 'saml_login' => @user.login },
-                         relay_state: :unset, validated_request_id: :unset,
+                         relay_state: :unset, validated_request_id: :unset, sudo_callback: true,
                          saml_uid: 'current-name-id', saml_session_index: '_current-session-index')
     relay_state = transaction[:relay_state] if relay_state == :unset
     validated_request_id = transaction[:context]['request_id'] if validated_request_id == :unset
 
+    # The classification verdict of the Sudo setup_phase extension. It runs in
+    # the OmniAuth middleware, which a functional test does not go through, so
+    # the verdict it would have reached is installed here. SamlSudoModeTest
+    # exercises the real classification.
+    request.env[RedmineSaml::SudoReauth::ENV_CALLBACK] = true if sudo_callback
     # The setup endpoint snapshots the identifiers before omniauth-saml
     # overwrites them. A test that installed its own snapshot keeps it.
     capture_previous_saml_session

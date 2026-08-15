@@ -10,17 +10,31 @@ class SudoReauthTest < RedmineSaml::TestCase
   class StrategyDouble
     attr_reader :options, :request, :callback_path, :script_name
 
-    def initialize(on_callback_path:, relay_state: nil,
+    def initialize(on_callback_path:, relay_state: nil, in_response_to: :none,
                    callback_path: RedmineSaml::CALLBACK_PATH, script_name: '')
       @on_callback_path = on_callback_path
       @callback_path = callback_path
       @script_name = script_name
       @options = {}
-      @request = RequestDouble.new relay_state
+      @request = RequestDouble.new relay_state, saml_response(in_response_to)
     end
 
     def on_callback_path?
       @on_callback_path
+    end
+
+    def on_request_path?
+      false
+    end
+
+    private
+
+    # An unsigned Response is enough here: the setup phase only decodes it to
+    # read the InResponseTo, and ruby-saml validates nothing at that point.
+    def saml_response(in_response_to)
+      return if in_response_to == :none
+
+      RedmineSaml::SamlResponseBuilder.encoded signed: false, in_response_to: in_response_to
     end
   end
 
@@ -28,8 +42,10 @@ class SudoReauthTest < RedmineSaml::TestCase
   class RequestDouble
     attr_reader :params
 
-    def initialize(relay_state)
-      @params = relay_state.nil? ? {} : { 'RelayState' => relay_state }
+    def initialize(relay_state, saml_response = nil)
+      @params = {}
+      @params['RelayState'] = relay_state unless relay_state.nil?
+      @params['SAMLResponse'] = saml_response unless saml_response.nil?
     end
   end
 
@@ -43,6 +59,9 @@ class SudoReauthTest < RedmineSaml::TestCase
 
   setup do
     prepare_tests
+    # SAML Sudo re-authentication follows Redmine's own Sudo Mode, which the
+    # test configuration keeps off, so it is turned on for these tests.
+    Redmine::SudoMode.stubs(:enabled?).returns true
     RedmineSaml::SudoTokenStore.register_action!
     @user = users :users_001
     @settings = RedmineSaml.configured_saml
@@ -52,9 +71,38 @@ class SudoReauthTest < RedmineSaml::TestCase
     User.current = nil
   end
 
-  test 'is enabled from Redmine 7.0 and disabled on Redmine 6.x' do
-    assert_equal 7, RedmineSaml::SudoReauth::MINIMUM_REDMINE_MAJOR_VERSION
-    assert_equal Redmine::VERSION::MAJOR >= 7, RedmineSaml::SudoReauth.supported?
+  test 'follows Redmine Sudo Mode on every supported Redmine release' do
+    assert RedmineSaml::SudoReauth.enabled?
+
+    Redmine::SudoMode.unstub :enabled?
+    Redmine::SudoMode.stubs(:enabled?).returns false
+
+    assert_not RedmineSaml::SudoReauth.enabled?
+  end
+
+  test 'is a complete no-op while Redmine Sudo Mode is off' do
+    Redmine::SudoMode.unstub :enabled?
+    Redmine::SudoMode.stubs(:enabled?).returns false
+    User.current = @user
+    pending = { RedmineSaml::SudoReauth::SESSION_KEY => pending_context,
+                logged_in_with_saml: true }
+
+    assert_not RedmineSaml::SudoReauth.available?(session: pending)
+    assert_not RedmineSaml::SudoReauth.pending?(session: pending)
+    assert_not RedmineSaml::SudoReauth.callback?(env: { RedmineSaml::SudoReauth::ENV_CALLBACK => true },
+                                                 session: pending)
+    assert_not RedmineSaml::SudoReauth.failure_message?(RedmineSaml::SudoReauth::FAILURE_MESSAGE)
+
+    strategy, env = sudo_marker_setup session: pending
+    assert_nothing_raised { RedmineSaml::SudoReauth.prepare_callback_validation env }
+    assert_not strategy.options.key?(:matches_request_id)
+    assert_not env[RedmineSaml::SudoReauth::ENV_CALLBACK]
+
+    request_strategy, = real_strategy path: '/auth/saml', session: pending
+    request_strategy.send :setup_phase
+
+    assert pending[RedmineSaml::SudoReauth::SESSION_KEY],
+           'nothing may be cancelled while Sudo Mode is off'
   end
 
   test 'builds and reads a RelayState that stays within the SAML 80 byte limit' do
@@ -80,31 +128,37 @@ class SudoReauthTest < RedmineSaml::TestCase
     assert_nil RedmineSaml::SudoReauth.relay_state_nonce(RedmineSaml::SudoReauth::RELAY_STATE_MARKER)
   end
 
-  test 'treats a callback as Sudo when either the RelayState or the session says so' do
-    marker = RedmineSaml::SudoReauth.relay_state RedmineSaml::SudoReauth.generate_nonce
+  test 'treats a callback as Sudo from the setup phase verdict or the session' do
+    classified = { RedmineSaml::SudoReauth::ENV_CALLBACK => true }
     pending = { RedmineSaml::SudoReauth::SESSION_KEY => { 'type' => 'sudo' } }
-    expected = RedmineSaml::SudoReauth.supported?
 
-    assert_equal expected, RedmineSaml::SudoReauth.callback?(session: {}, relay_state: marker)
-    assert_equal expected, RedmineSaml::SudoReauth.callback?(session: pending, relay_state: nil)
-    assert_equal expected, RedmineSaml::SudoReauth.callback?(session: pending, relay_state: marker)
-    assert_not RedmineSaml::SudoReauth.callback?(session: {}, relay_state: nil)
-    assert_not RedmineSaml::SudoReauth.callback?(session: {}, relay_state: '/projects')
+    assert RedmineSaml::SudoReauth.callback?(env: classified, session: {})
+    assert RedmineSaml::SudoReauth.callback?(env: {}, session: pending)
+    assert RedmineSaml::SudoReauth.callback?(env: classified, session: pending)
+    assert_not RedmineSaml::SudoReauth.callback?(env: {}, session: {})
+    assert_not RedmineSaml::SudoReauth.callback?(env: nil, session: nil)
+  end
+
+  test 'never classifies a callback from request parameters outside the setup phase' do
+    marker = RedmineSaml::SudoReauth.relay_state RedmineSaml::SudoReauth.generate_nonce
+
+    # A RelayState that only Rails would see is not a classification signal:
+    # the setup phase reads Rack parameters and is the single authority.
+    assert_not RedmineSaml::SudoReauth.callback?(env: { 'RelayState' => marker }, session: {})
   end
 
   test 'reports a pending transaction only from the session' do
     pending = { RedmineSaml::SudoReauth::SESSION_KEY => { 'type' => 'sudo' } }
 
-    assert_equal RedmineSaml::SudoReauth.supported?, RedmineSaml::SudoReauth.pending?(session: pending)
+    assert RedmineSaml::SudoReauth.pending?(session: pending)
     assert_not RedmineSaml::SudoReauth.pending?(session: {})
   end
 
   test 'is available only for an enabled SAML session with Sudo Mode on' do
     User.current = @user
-    Redmine::SudoMode.stubs(:enabled?).returns(true)
     saml_session = { logged_in_with_saml: true }
 
-    assert_equal RedmineSaml::SudoReauth.supported?, RedmineSaml::SudoReauth.available?(session: saml_session)
+    assert RedmineSaml::SudoReauth.available?(session: saml_session)
     assert_not RedmineSaml::SudoReauth.available?(session: {}),
                'a local login session keeps the standard Redmine password prompt'
 
@@ -114,6 +168,7 @@ class SudoReauthTest < RedmineSaml::TestCase
 
   test 'is unavailable when Redmine Sudo Mode is off or nobody is signed in' do
     User.current = @user
+    Redmine::SudoMode.unstub :enabled?
     Redmine::SudoMode.stubs(:enabled?).returns(false)
 
     assert_not RedmineSaml::SudoReauth.available?(session: { logged_in_with_saml: true })
@@ -126,8 +181,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'setup endpoint arms InResponseTo validation only for a pending Sudo callback' do
-    skip_unless_sudo_supported
-
     strategy = StrategyDouble.new on_callback_path: true
     env = setup_env strategy, session: { RedmineSaml::SudoReauth::SESSION_KEY => pending_context }
 
@@ -138,8 +191,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'setup endpoint snapshots the SAML session identifiers before omniauth-saml overwrites them' do
-    skip_unless_sudo_supported
-
     strategy = StrategyDouble.new on_callback_path: true
     env = setup_env strategy,
                     session: { RedmineSaml::SudoReauth::SESSION_KEY => pending_context,
@@ -154,8 +205,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'setup endpoint snapshots absent SAML session identifiers as nil' do
-    skip_unless_sudo_supported
-
     strategy = StrategyDouble.new on_callback_path: true
     env = setup_env strategy, session: { RedmineSaml::SudoReauth::SESSION_KEY => pending_context }
 
@@ -192,8 +241,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'setup endpoint fails a Sudo marker without any transaction closed' do
-    skip_unless_sudo_supported
-
     strategy, env = sudo_marker_setup session: {}
 
     assert_raise RedmineSaml::SudoReauth::CallbackRejected do
@@ -203,8 +250,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'setup endpoint fails a Sudo marker with a consumed transaction closed' do
-    skip_unless_sudo_supported
-
     session = { RedmineSaml::SudoReauth::SESSION_KEY => pending_context }
     session.delete RedmineSaml::SudoReauth::SESSION_KEY
     strategy, env = sudo_marker_setup session: session
@@ -216,8 +261,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'setup endpoint fails an expired transaction closed' do
-    skip_unless_sudo_supported
-
     expired = pending_context now: RedmineSaml::SudoContext::VALIDITY.ago - 1.minute
     strategy, env = sudo_marker_setup session: { RedmineSaml::SudoReauth::SESSION_KEY => expired }
 
@@ -228,8 +271,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'setup endpoint fails a malformed transaction closed' do
-    skip_unless_sudo_supported
-
     %w[type version].each do |broken_key|
       damaged = pending_context.merge broken_key => 'broken'
       strategy, env = sudo_marker_setup session: { RedmineSaml::SudoReauth::SESSION_KEY => damaged }
@@ -242,8 +283,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'setup endpoint fails an expired transaction closed without a RelayState marker' do
-    skip_unless_sudo_supported
-
     expired = pending_context now: RedmineSaml::SudoContext::VALIDITY.ago - 1.minute
     strategy = StrategyDouble.new on_callback_path: true
     env = setup_env strategy, session: { RedmineSaml::SudoReauth::SESSION_KEY => expired }
@@ -254,8 +293,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'setup endpoint still arms a pending transaction when the RelayState was stripped' do
-    skip_unless_sudo_supported
-
     strategy = StrategyDouble.new on_callback_path: true, relay_state: nil
     env = setup_env strategy, session: { RedmineSaml::SudoReauth::SESSION_KEY => pending_context }
 
@@ -266,8 +303,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'setup endpoint fails closed when it breaks after detecting a Sudo callback' do
-    skip_unless_sudo_supported
-
     strategy = StrategyDouble.new on_callback_path: true
     env = setup_env strategy, session: { RedmineSaml::SudoReauth::SESSION_KEY => pending_context }
     RedmineSaml::SudoContext.stubs(:load_context).raises(RuntimeError, 'unexpected setup failure')
@@ -301,8 +336,7 @@ class SudoReauthTest < RedmineSaml::TestCase
     assert_equal 'redmine_saml_sudo_reauth', RedmineSaml::SudoReauth::FAILURE_MESSAGE
     assert_equal RedmineSaml::SudoReauth::FAILURE_MESSAGE,
                  RedmineSaml::SudoReauth::CallbackRejected.new.message
-    assert_equal RedmineSaml::SudoReauth.supported?,
-                 RedmineSaml::SudoReauth.failure_message?(RedmineSaml::SudoReauth::FAILURE_MESSAGE)
+    assert RedmineSaml::SudoReauth.failure_message?(RedmineSaml::SudoReauth::FAILURE_MESSAGE)
     assert_not RedmineSaml::SudoReauth.failure_message?('invalid_ticket')
     assert_not RedmineSaml::SudoReauth.failure_message?(nil)
   end
@@ -317,15 +351,13 @@ class SudoReauthTest < RedmineSaml::TestCase
     assert_not RedmineSaml.configured_saml.key?('setup')
   end
 
-  test 'extends OmniAuth setup_phase only from Redmine 7.0' do
-    assert_equal RedmineSaml::SudoReauth.supported?,
-                 OmniAuth::Strategies::SAML.include?(RedmineSaml::SudoReauth::SetupPhase)
+  test 'extends OmniAuth setup_phase on every supported Redmine release' do
+    assert OmniAuth::Strategies::SAML.include?(RedmineSaml::SudoReauth::SetupPhase)
     assert_not RedmineSaml::SudoReauth.install_setup_phase!,
                'installing the extension twice must be a no-op'
   end
 
   test 'runs a callable deployment setup first and keeps its option changes' do
-    skip_unless_sudo_supported
     calls = []
     deployment_setup = lambda do |env|
       calls << :deployment_setup
@@ -344,7 +376,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'keeps the call-through form of the deployment setup' do
-    skip_unless_sudo_supported
     seen = []
     strategy, = real_strategy setup: true,
                               session: {},
@@ -359,7 +390,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'keeps a custom setup_path of the deployment' do
-    skip_unless_sudo_supported
     seen = []
     strategy, = real_strategy setup: true,
                               setup_path: '/deployment/saml/setup',
@@ -375,7 +405,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'never swallows an error raised by the deployment setup' do
-    skip_unless_sudo_supported
     deployment_setup = ->(_env) { raise 'deployment setup failure' }
     strategy, env = real_strategy setup: deployment_setup,
                                   session: { RedmineSaml::SudoReauth::SESSION_KEY => pending_context }
@@ -391,7 +420,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'still fails a Sudo callback closed after the deployment setup succeeded' do
-    skip_unless_sudo_supported
     calls = []
     strategy, = real_strategy setup: ->(_env) { calls << :deployment_setup },
                               session: {},
@@ -405,7 +433,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'leaves a SAML provider of another plugin alone' do
-    skip_unless_sudo_supported
     strategy, env = real_strategy name: 'other_saml',
                                   path: '/auth/other_saml/callback',
                                   session: { RedmineSaml::SudoReauth::SESSION_KEY => pending_context },
@@ -418,7 +445,6 @@ class SudoReauthTest < RedmineSaml::TestCase
   end
 
   test 'recognises its own callback under a relative URL root' do
-    skip_unless_sudo_supported
     strategy, = real_strategy script_name: '/redmine',
                               session: { RedmineSaml::SudoReauth::SESSION_KEY => pending_context }
 
@@ -428,8 +454,7 @@ class SudoReauthTest < RedmineSaml::TestCase
     assert_equal '_authn-request-id', strategy.options[:matches_request_id]
   end
 
-  test 'ignores the request and other phases of its own provider' do
-    skip_unless_sudo_supported
+  test 'never arms or classifies outside the callback phase of its own provider' do
     %w[/auth/saml /auth/saml/metadata /auth/saml/sls].each do |path|
       strategy, env = real_strategy path: path,
                                     session: { RedmineSaml::SudoReauth::SESSION_KEY => pending_context }
@@ -438,7 +463,176 @@ class SudoReauthTest < RedmineSaml::TestCase
 
       assert_not strategy.options.key?(:matches_request_id), path
       assert_nil RedmineSaml::SudoReauth.previous_saml_session(env), path
+      assert_not env[RedmineSaml::SudoReauth::ENV_CALLBACK], path
     end
+  end
+
+  test 'leaves the metadata and Single Logout phases of its own provider untouched' do
+    %w[/auth/saml/metadata /auth/saml/sls].each do |path|
+      session = { RedmineSaml::SudoReauth::SESSION_KEY => pending_context }
+      strategy, = real_strategy path: path, session: session
+
+      strategy.send :setup_phase
+
+      assert session[RedmineSaml::SudoReauth::SESSION_KEY], path
+      assert_equal 1, sudo_transaction_count, path
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Request phase cancellation
+  # ---------------------------------------------------------------------------
+
+  test 'cancels a pending transaction when a normal SAML login request starts' do
+    session = { RedmineSaml::SudoReauth::SESSION_KEY => pending_context }
+    strategy, = real_strategy path: '/auth/saml', session: session
+
+    strategy.send :setup_phase
+
+    assert_nil session[RedmineSaml::SudoReauth::SESSION_KEY]
+    assert_equal 0, sudo_transaction_count,
+                 'the server side transaction Token has to go with the session state'
+  end
+
+  test 'keeps the request registry when a normal SAML login request cancels a transaction' do
+    session = { RedmineSaml::SudoReauth::SESSION_KEY => pending_context }
+    RedmineSaml::SudoTokenStore.register_request @user, '_authn-request-id'
+    strategy, = real_strategy path: '/auth/saml', session: session
+
+    strategy.send :setup_phase
+
+    assert RedmineSaml::SudoTokenStore.request_registered?('_authn-request-id'),
+           'a Response for the cancelled transaction must still be recognised as Sudo'
+  end
+
+  test 'cancels nothing for the request phase of a SAML provider of another plugin' do
+    session = { RedmineSaml::SudoReauth::SESSION_KEY => pending_context }
+    strategy, = real_strategy name: 'other_saml', path: '/auth/other_saml', session: session
+
+    strategy.send :setup_phase
+
+    assert session[RedmineSaml::SudoReauth::SESSION_KEY]
+    assert_equal 1, sudo_transaction_count
+  end
+
+  test 'survives a request phase without a usable session' do
+    strategy, = real_strategy path: '/auth/saml', session: {}
+
+    assert_nothing_raised { strategy.send :setup_phase }
+  end
+
+  # ---------------------------------------------------------------------------
+  # Sudo request registry classification
+  # ---------------------------------------------------------------------------
+
+  test 'classifies a callback as Sudo from the request registry alone' do
+    RedmineSaml::SudoTokenStore.register_request @user, '_registered-request-id'
+    strategy = StrategyDouble.new on_callback_path: true, in_response_to: '_registered-request-id'
+    env = setup_env strategy, session: {}
+
+    assert_raise RedmineSaml::SudoReauth::CallbackRejected do
+      RedmineSaml::SudoReauth.prepare_callback_validation env
+    end
+    assert env[RedmineSaml::SudoReauth::ENV_CALLBACK]
+    assert_not strategy.options.key?(:matches_request_id)
+  end
+
+  test 'keeps classifying a Sudo Response after its transaction was consumed' do
+    context = pending_context
+    RedmineSaml::SudoTokenStore.register_request @user, '_authn-request-id'
+    assert RedmineSaml::SudoTokenStore.consume_transaction(context)
+    strategy = StrategyDouble.new on_callback_path: true, in_response_to: '_authn-request-id'
+    env = setup_env strategy, session: {}
+
+    assert_raise RedmineSaml::SudoReauth::CallbackRejected do
+      RedmineSaml::SudoReauth.prepare_callback_validation env
+    end
+    assert env[RedmineSaml::SudoReauth::ENV_CALLBACK]
+  end
+
+  test 'stops classifying a Sudo Response once the request registry expired' do
+    RedmineSaml::SudoTokenStore.register_request @user, '_registered-request-id'
+    strategy = StrategyDouble.new on_callback_path: true, in_response_to: '_registered-request-id'
+    env = setup_env strategy, session: {}
+
+    travel_to RedmineSaml::SudoTokenStore::REQUEST_VALIDITY.from_now + 1.minute do
+      assert_nothing_raised { RedmineSaml::SudoReauth.prepare_callback_validation env }
+    end
+
+    assert_not env[RedmineSaml::SudoReauth::ENV_CALLBACK]
+  end
+
+  test 'never classifies an unrelated login callback from the request registry' do
+    RedmineSaml::SudoTokenStore.register_request @user, '_registered-request-id'
+    strategy = StrategyDouble.new on_callback_path: true, in_response_to: '_a-normal-login-request'
+    env = setup_env strategy, session: {}
+
+    assert_nothing_raised { RedmineSaml::SudoReauth.prepare_callback_validation env }
+
+    assert_not env[RedmineSaml::SudoReauth::ENV_CALLBACK]
+    assert_not strategy.options.key?(:matches_request_id)
+  end
+
+  test 'never classifies an IdP initiated login without an InResponseTo' do
+    RedmineSaml::SudoTokenStore.register_request @user, '_registered-request-id'
+    strategy = StrategyDouble.new on_callback_path: true, in_response_to: nil
+    env = setup_env strategy, session: {}
+
+    assert_nothing_raised { RedmineSaml::SudoReauth.prepare_callback_validation env }
+
+    assert_not env[RedmineSaml::SudoReauth::ENV_CALLBACK]
+  end
+
+  test 'never rejects a normal login just because the request registry is unavailable' do
+    strategy = StrategyDouble.new on_callback_path: true, in_response_to: '_registered-request-id'
+    env = setup_env strategy, session: {}
+    RedmineSaml::SudoTokenStore.stubs(:request_registered?).raises(RuntimeError, 'registry down')
+
+    assert_nothing_raised { RedmineSaml::SudoReauth.prepare_callback_validation env }
+
+    assert_not env[RedmineSaml::SudoReauth::ENV_CALLBACK]
+    assert_not strategy.options.key?(:matches_request_id)
+  end
+
+  test 'still fails a Sudo callback closed when the request registry is unavailable' do
+    RedmineSaml::SudoTokenStore.stubs(:request_registered?).raises(RuntimeError, 'registry down')
+
+    # A pending session transaction and a RelayState marker are both signals
+    # that need neither the registry nor the Response.
+    _marker_strategy, env = sudo_marker_setup session: {}
+    assert_raise RedmineSaml::SudoReauth::CallbackRejected do
+      RedmineSaml::SudoReauth.prepare_callback_validation env
+    end
+    assert env[RedmineSaml::SudoReauth::ENV_CALLBACK]
+
+    expired = pending_context now: RedmineSaml::SudoContext::VALIDITY.ago - 1.minute
+    strategy = StrategyDouble.new on_callback_path: true
+    env = setup_env strategy, session: { RedmineSaml::SudoReauth::SESSION_KEY => expired }
+    assert_raise RedmineSaml::SudoReauth::CallbackRejected do
+      RedmineSaml::SudoReauth.prepare_callback_validation env
+    end
+    assert env[RedmineSaml::SudoReauth::ENV_CALLBACK]
+  end
+
+  test 'reads the InResponseTo of a real Response with ruby-saml only' do
+    RedmineSaml::SudoTokenStore.register_request @user, '_a-real-authn-request'
+    strategy, env = real_strategy session: {},
+                                  saml_response: RedmineSaml::SamlResponseBuilder.encoded(
+                                    in_response_to: '_a-real-authn-request'
+                                  )
+
+    assert_raise RedmineSaml::SudoReauth::CallbackRejected do
+      strategy.send :setup_phase
+    end
+    assert env[RedmineSaml::SudoReauth::ENV_CALLBACK]
+  end
+
+  test 'never classifies a Response that ruby-saml cannot even decode' do
+    strategy, env = real_strategy session: {}, saml_response: 'not-a-saml-response'
+
+    assert_nothing_raised { strategy.send :setup_phase }
+
+    assert_not env[RedmineSaml::SudoReauth::ENV_CALLBACK]
   end
 
   private
@@ -446,14 +640,17 @@ class SudoReauthTest < RedmineSaml::TestCase
   # A real OmniAuth::Strategies::SAML, so that the prepended setup_phase and
   # OmniAuth's own setup semantics are exercised together.
   def real_strategy(session:, path: RedmineSaml::CALLBACK_PATH, script_name: '', name: 'saml',
-                    setup: nil, setup_path: nil, relay_state: nil, app: ->(_env) { [200, {}, []] })
+                    setup: nil, setup_path: nil, relay_state: nil, saml_response: nil,
+                    app: ->(_env) { [200, {}, []] })
     options = RedmineSaml.configured_saml.to_h.symbolize_keys
     options[:name] = name
     options[:setup] = setup unless setup.nil?
     options[:setup_path] = setup_path if setup_path
     strategy = OmniAuth::Strategies::SAML.new app, options
 
-    params = relay_state ? { RedmineSaml::SudoReauth::RELAY_STATE_PARAM => relay_state } : {}
+    params = {}
+    params[RedmineSaml::SudoReauth::RELAY_STATE_PARAM] = relay_state if relay_state
+    params[RedmineSaml::SudoReauth::SAML_RESPONSE_PARAM] = saml_response if saml_response
     env = Rack::MockRequest.env_for "#{script_name}#{path}", method: 'POST', params: params
     env['SCRIPT_NAME'] = script_name
     env['PATH_INFO'] = path
@@ -461,10 +658,6 @@ class SudoReauthTest < RedmineSaml::TestCase
     env['omniauth.strategy'] = strategy
     strategy.instance_variable_set :@env, env
     [strategy, env]
-  end
-
-  def skip_unless_sudo_supported
-    skip 'SAML sudo re-authentication requires Redmine 7.0' unless RedmineSaml::SudoReauth.supported?
   end
 
   def sudo_marker_setup(session:)
@@ -475,6 +668,10 @@ class SudoReauthTest < RedmineSaml::TestCase
 
   def setup_env(strategy, session:)
     { 'omniauth.strategy' => strategy, 'rack.session' => session }
+  end
+
+  def sudo_transaction_count
+    Token.where(action: RedmineSaml::SudoTokenStore::ACTION).count
   end
 
   def pending_context(now: Time.current)

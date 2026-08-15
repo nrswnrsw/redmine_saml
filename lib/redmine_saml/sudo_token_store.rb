@@ -17,21 +17,87 @@ module RedmineSaml
   # its own Token action so that Single Logout semantics stay untouched. It
   # needs no schema change: Token.add_action registers actions at runtime and
   # the tokens table already stores user_id, action, value and created_on.
+  #
+  # A second Token action holds the Sudo request registry. It answers one
+  # question only: was this AuthnRequest ID issued by a Sudo transaction? The
+  # single use transaction Token cannot answer it, because it is consumed by
+  # the very first callback, after which a replayed Sudo Response would no
+  # longer be recognised as one. The registry entry therefore deliberately
+  # outlives the transaction and expires on time alone.
   class SudoTokenStore
     ACTION = 'redmine_saml_sudo'
     MAX_INSTANCES = 1
     TRANSACTION_VALIDITY = SudoContext::VALIDITY
+
+    # Registry of the AuthnRequests issued for Sudo transactions.
+    #
+    # Every entry a user holds within the validity window is kept: consuming
+    # or cancelling one transaction must not stop a Response of an earlier one
+    # from being recognised, and a user can legitimately start several
+    # transactions within that window. Entries are only ever removed once they
+    # expire.
+    REQUEST_ACTION = 'redmine_saml_sudo_req'
+    REQUEST_VALIDITY = SudoContext::VALIDITY
+
+    # tokens.value is a unique column of 40 characters, which is also the
+    # length Token.generate_token_value produces.
+    REQUEST_VALUE_LENGTH = 40
 
     class << self
       def register_action!
         Token.add_action ACTION,
                          max_instances: MAX_INSTANCES,
                          validity_time: proc { TRANSACTION_VALIDITY }
+        # max_instances is what Token#delete_previous_tokens evicts by, which
+        # a registry entry must never be subject to, so it is registered only
+        # because Token#max_instances would otherwise be nil. Registry entries
+        # are inserted without that callback, see register_request.
+        # validity_time is the part that matters here: it lets
+        # Token.destroy_expired prune expired entries with everything else.
+        Token.add_action REQUEST_ACTION,
+                         max_instances: MAX_INSTANCES,
+                         validity_time: proc { REQUEST_VALIDITY }
       end
 
       def create_transaction(user)
         register_action!
         Token.create! user_id: user.id, action: ACTION
+      end
+
+      # Records that this AuthnRequest ID belongs to a Sudo transaction.
+      #
+      # Only a digest is stored. The AuthnRequest ID itself travels through
+      # the browser, so this is a lookup key rather than a secret, but there
+      # is no reason to keep a value the SP does not need in clear text.
+      #
+      # Token#delete_previous_tokens, a before_create callback, evicts older
+      # entries of the same user by count alone, which would drop an entry
+      # that is still within REQUEST_VALIDITY and let the Response it covers
+      # be taken for a normal login. The row is therefore inserted without
+      # callbacks, which also keeps the chosen value that
+      # Token#generate_new_token would otherwise replace. Expired entries of
+      # the same user are pruned here instead, so the table cannot grow
+      # without bound between Token.destroy_expired runs.
+      def register_request(user, request_id, now: Time.current)
+        register_action!
+        value = request_value request_id
+        raise ArgumentError, 'a sudo request registry entry needs an AuthnRequest ID' if value.blank?
+
+        cleanup_expired_requests user, now: now
+        Token.insert!({ user_id: user.id, action: REQUEST_ACTION, value: value,
+                        created_on: now, updated_on: now })
+        Token.find_by action: REQUEST_ACTION, value: value
+      end
+
+      # True while a Sudo transaction that issued this AuthnRequest ID is
+      # still within the registry validity window, whether or not it was
+      # already consumed or cancelled, and independently of any session.
+      def request_registered?(request_id, now: Time.current)
+        value = request_value request_id
+        return false if value.blank?
+
+        Token.where(action: REQUEST_ACTION, value: value)
+             .exists?(created_on: (now - REQUEST_VALIDITY)..)
       end
 
       def valid_transaction(context, now: Time.current)
@@ -66,6 +132,19 @@ module RedmineSaml
       # rubocop:enable Naming/PredicateMethod
 
       private
+
+      def cleanup_expired_requests(user, now: Time.current)
+        Token.where(user_id: user.id, action: REQUEST_ACTION)
+             .where(created_on: ...(now - REQUEST_VALIDITY))
+             .delete_all
+      end
+
+      def request_value(request_id)
+        request_id = request_id.to_s
+        return if request_id.blank?
+
+        SudoContext.digest(request_id)[0, REQUEST_VALUE_LENGTH]
+      end
 
       def token_scope(token)
         Token.where id: token.id, user_id: token.user_id, action: ACTION, value: token.value

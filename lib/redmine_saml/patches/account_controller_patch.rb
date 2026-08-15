@@ -63,6 +63,10 @@ module RedmineSaml
           authn_request = OneLogin::RubySaml::Authrequest.new
           nonce = RedmineSaml::SudoReauth.generate_nonce
           token = RedmineSaml::SudoTokenStore.create_transaction User.current
+          # Registered before the AuthnRequest can reach the IdP, so every
+          # Response the IdP could produce for it is already recognisable as a
+          # Sudo one. The entry outlives this transaction on purpose.
+          RedmineSaml::SudoTokenStore.register_request User.current, authn_request.uuid
           context = RedmineSaml::SudoContext.build(
             user_id: User.current.id,
             request_id: authn_request.uuid,
@@ -383,12 +387,14 @@ module RedmineSaml
           render_error message: :error_saml_sudo_reauth_unavailable, status: 403
         end
 
-        # A callback belongs to a Sudo transaction when the RelayState carries
-        # the Sudo marker or the session still holds a Sudo transaction. Once
-        # this returns true the request never falls back to the normal login
-        # path, so a replayed Sudo Response cannot reach handle_active_user.
+        # The Sudo setup_phase extension classified this callback before
+        # omniauth-saml touched it, so its verdict is simply read back here.
+        # Once this returns true the request never falls back to the normal
+        # login path, so a Sudo Response cannot reach handle_active_user, not
+        # even after its transaction was consumed and not even in a browser
+        # session that never started one.
         def saml_sudo_reauth_callback?
-          RedmineSaml::SudoReauth.callback? session: session, relay_state: params[:RelayState]
+          RedmineSaml::SudoReauth.callback? env: request.env, session: session
         end
 
         def saml_sudo_reauth_pending?
@@ -429,17 +435,35 @@ module RedmineSaml
 
           # The IdP may have issued a new NameID or SessionIndex. They are only
           # adopted once the transaction proved it is the same Redmine user, so
-          # the SLO context is built from the values that are already in the
-          # session at this point. It is serialized here as well, so that the
-          # commit only has to perform the cookie write itself.
-          slo_context = build_active_slo_context
+          # the SAML identity is resolved here and the SLO context is built
+          # from it. It is serialized here as well, so that the commit only has
+          # to perform the cookie write itself.
+          identity = saml_sudo_reauth_identity
+          slo_context = build_active_slo_context name_id: identity['saml_uid'],
+                                                 session_index: identity['saml_session_index']
           { return_path: saml_sudo_reauth_return_path(context),
+            identity: identity,
             slo_payload: slo_context && RedmineSaml::SloContext.dump(slo_context) }
         rescue StandardError => e
           { reason: "sudo re-authentication raised #{e.class}" }
         end
 
-        # The success boundary. Only writes to the response, and only the two
+        # The SAML identity the session keeps after a successful transaction.
+        #
+        # A NameID or SessionIndex the new Response carries is adopted, which
+        # is the existing behaviour. One it does not carry must not erase what
+        # the session had before: omniauth-saml writes nil for a missing NameID
+        # or SessionIndex, and a successful Sudo re-authentication may only
+        # refresh the Sudo timestamp, never degrade the session identity. Each
+        # of the two falls back on its own, so a Response that renews only one
+        # of them keeps the other.
+        def saml_sudo_reauth_identity
+          snapshot = RedmineSaml::SudoReauth.previous_saml_session(request.env) || {}
+          { 'saml_uid' => session['saml_uid'].presence || snapshot['saml_uid'],
+            'saml_session_index' => session['saml_session_index'].presence || snapshot['saml_session_index'] }
+        end
+
+        # The success boundary. Only writes to the response, and only the three
         # writes below.
         #
         # The SLO cookie is written first. Its write is atomic: Rails encrypts
@@ -448,16 +472,26 @@ module RedmineSaml
         # is rolled back, by restoring the SAML session identifiers, which keeps
         # the identifiers, the SLO cookie and the Sudo timestamp consistent.
         #
-        # Once the cookie write succeeded nothing is rolled back any more.
-        # update_sudo_timestamp! is a plain session assignment, and the logging
-        # and redirect that follow are outside any rescue, so a refreshed Sudo
-        # timestamp can never be combined with restored identifiers.
+        # Once the cookie write succeeded nothing is rolled back any more. The
+        # two writes that follow are plain session assignments, and the logging
+        # and redirect after them are outside any rescue, so a refreshed Sudo
+        # timestamp can never be combined with restored identifiers. The
+        # identity is written after the cookie so that both describe the same
+        # NameID and SessionIndex.
         #
         # The protected action is not resumed here, so SudoMode.active! is not
         # needed: the next request revalidates the timestamp on its own.
         def commit_saml_sudo_reauth(prepared)
           write_saml_sudo_reauth_slo_context prepared[:slo_payload]
+          apply_saml_sudo_reauth_identity prepared[:identity]
           update_sudo_timestamp!
+        end
+
+        def apply_saml_sudo_reauth_identity(identity)
+          return if identity.blank?
+
+          restore_saml_sudo_reauth_value 'saml_uid', identity['saml_uid']
+          restore_saml_sudo_reauth_value 'saml_session_index', identity['saml_session_index']
         end
 
         def write_saml_sudo_reauth_slo_context(payload)
@@ -526,7 +560,7 @@ module RedmineSaml
         end
 
         def cancel_saml_sudo_reauth
-          return unless RedmineSaml::SudoReauth.supported?
+          return unless RedmineSaml::SudoReauth.enabled?
 
           state = saml_sudo_reauth_state
           return if state.blank?
@@ -547,14 +581,7 @@ module RedmineSaml
         end
 
         def saml_sudo_reauth_state_hash(value)
-          return unless value.respond_to? :to_h
-
-          hash = value.to_h.deep_stringify_keys
-          return unless hash['type'] == RedmineSaml::SudoContext::TYPE
-
-          hash
-        rescue StandardError
-          nil
+          RedmineSaml::SudoReauth.transaction_state value
         end
 
         # omniauth-saml overwrites session['saml_uid'] and
@@ -700,8 +727,8 @@ module RedmineSaml
         # Everything that can fail while producing the active SLO context: a
         # Token lookup and the digest computation. Split out so that the Sudo
         # callback can run it before it commits anything.
-        def build_active_slo_context
-          return if session['saml_uid'].blank?
+        def build_active_slo_context(name_id: session['saml_uid'], session_index: session['saml_session_index'])
+          return if name_id.blank?
 
           token = RedmineSaml::SloTokenStore.session_token user_id: session[:user_id], value: session[:tk]
           return unless token
@@ -709,8 +736,8 @@ module RedmineSaml
           RedmineSaml::SloContext.active(
             user_id: session[:user_id],
             token: token,
-            name_id: session['saml_uid'],
-            session_index: session['saml_session_index'],
+            name_id: name_id,
+            session_index: session_index,
             settings: omniauth_saml_settings
           )
         end

@@ -4,7 +4,6 @@ require_dependency 'application_controller'
 
 module RedmineSaml
   module Patches
-    # Only applied on Redmine 7.0 and later. See RedmineSaml.setup.
     module ApplicationControllerPatch
       extend ActiveSupport::Concern
 
