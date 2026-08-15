@@ -4,6 +4,8 @@ This file records notable user-facing changes to the maintained `nrswnrsw/redmin
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-15
+
 ### Added
 
 - SAML confirmation for Redmine's Sudo Mode, on **every supported Redmine version**. When the Sudo Mode timeout expires and the current Redmine session was created by SAML, Redmine's local password prompt is replaced by a SAML confirmation button, both for the normal page prompt and for the modal shown by XHR requests. SAML-only users have no local Redmine password and could otherwise not complete Sudo-protected actions. Redmine 7.0 enables Sudo Mode by default; Redmine 6.0 and 6.1 only when `sudo_mode: true` is configured.

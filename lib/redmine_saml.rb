@@ -9,7 +9,7 @@ require_relative 'redmine_saml/sudo_token_store'
 require_relative 'redmine_saml/sudo_reauth'
 
 module RedmineSaml
-  VERSION = '1.1.1'
+  VERSION = '1.2.0'
 
   METADATA_PATH = '/auth/saml/metadata'
   CALLBACK_PATH = '/auth/saml/callback'
