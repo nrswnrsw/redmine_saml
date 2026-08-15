@@ -12,4 +12,8 @@ Rails.application.routes.draw do
   match '/auth/saml/sls' => 'account#redirect_after_saml_logout',
         as: :redirect_after_saml_logout,
         via: %i[get post]
+  # Deliberately outside /auth/saml so that the OmniAuth SAML strategy does not
+  # claim this path in its request, callback or other phase.
+  post '/saml/sudo_reauth' => 'account#saml_sudo_reauth',
+       as: :saml_sudo_reauth
 end

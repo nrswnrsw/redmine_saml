@@ -1,0 +1,7 @@
+h2 = l :label_saml_sudo_reauth_required
+p.nodata style="font-size: 1em;" = l :text_saml_sudo_reauth_info
+
+#saml-sudo-reauth
+  = form_with url: saml_sudo_reauth_path, method: :post, local: true, id: 'saml-sudo-reauth-form' do |f|
+    = f.hidden_field :back_url, value: @saml_sudo_return_url, id: nil
+    = f.button l(:button_saml_sudo_reauth), type: 'submit'

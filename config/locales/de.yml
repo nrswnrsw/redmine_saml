@@ -1,11 +1,19 @@
 de:
+  button_saml_sudo_reauth: Mit SSO bestätigen
   error_saml_authenticity_error: SAML Authentifzierungs-Fehler
   error_saml_invalid_ticket: Ungültiges SAML Ticket
+  error_saml_sudo_reauth_failed: SSO-Bestätigung fehlgeschlagen. Bitte erneut versuchen.
+  error_saml_sudo_reauth_unavailable: SSO-Bestätigung ist für diese Sitzung nicht verfügbar.
   label_onthefly_creation: Benutzer automatisch anlegen?
   label_replace_redmine_login: Redmine Anmeldeseite ersetzen
   label_saml_enabled: SAML Authentifizierung aktivieren
   label_saml_login_label: Anmeldeseite Text
+  label_saml_sudo_reauth_required: Bestätigen Sie Ihre Identität, um fortzufahren
   label_saml_test_plural: Tests
   saml_login_label: Mit SSO anmelden
   text_full_logout_proposal: You may want to %{value} before trying an other username.
   text_logout_from_saml: SSO Sitzung schliessen
+  text_saml_sudo_reauth_info: >-
+    Für diese Aktion müssen Sie Ihre Identität bestätigen. Sie sind mit SSO
+    angemeldet, daher erfolgt die Bestätigung über Ihren Identity Provider. Sie
+    bleiben in Redmine angemeldet und müssen die Aktion danach ggf. wiederholen.

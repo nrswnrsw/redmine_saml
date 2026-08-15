@@ -1,11 +1,19 @@
 en:
+  button_saml_sudo_reauth: Confirm with SSO
   error_saml_authenticity_error: SAML authentication error
   error_saml_invalid_ticket: Invalid SAML ticket
+  error_saml_sudo_reauth_failed: SSO confirmation failed. Please try again.
+  error_saml_sudo_reauth_unavailable: SSO confirmation is not available for this session.
   label_onthefly_creation: Create users automatically?
   label_replace_redmine_login: Replace Redmine login page
   label_saml_enabled: Enable SAML authentication
   label_saml_login_label: Login page text
+  label_saml_sudo_reauth_required: Confirm your identity to continue
   label_saml_test_plural: Tests
   saml_login_label: Login with SSO
   text_full_logout_proposal: You may want to %{value} before trying an other username.
   text_logout_from_saml: close SSO session
+  text_saml_sudo_reauth_info: >-
+    This action requires you to confirm your identity. You are signed in with SSO,
+    so the confirmation is done by your identity provider. You stay signed in to
+    Redmine, and you may have to repeat the action afterwards.

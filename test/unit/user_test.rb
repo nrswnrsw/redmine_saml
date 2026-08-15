@@ -230,6 +230,73 @@ class UserTest < RedmineSaml::TestCase
     end
   end
 
+  context 'User#find_from_omniauth_saml' do
+    should 'use the same lookup order as the normal SAML login' do
+      user = create_legacy_user login: 'readonly-login-lookup',
+                                mail: 'readonly-login-lookup@example.com'
+
+      assert_equal user.id, User.find_from_omniauth_saml(saml_login: user.login).id
+      assert_equal user.id, User.find_from_omniauth_saml(mail: user.mail).id
+      assert_nil User.find_from_omniauth_saml(saml_login: 'not_existent')
+    end
+
+    should 'prefer the mapped login over the mapped mail exactly like the normal login' do
+      by_login = create_legacy_user login: 'readonly-by-login',
+                                    mail: 'readonly-by-login@example.com'
+      by_mail = create_legacy_user login: 'readonly-by-mail',
+                                   mail: 'readonly-by-mail@example.com'
+      attributes = { saml_login: by_login.login, mail: by_mail.mail }
+
+      assert_equal by_login.id, User.find_from_omniauth_saml(attributes).id
+      assert_equal User.find_or_create_from_omniauth(attributes).id,
+                   User.find_from_omniauth_saml(attributes).id
+    end
+
+    should 'never create a user even when onthefly_creation is enabled' do
+      change_saml_settings onthefly_creation: 1
+
+      assert_no_difference 'User.count' do
+        assert_nil User.find_from_omniauth_saml(saml_login: 'readonly-new',
+                                                mail: 'readonly-new@example.com',
+                                                first_name: 'Read',
+                                                last_name: 'Only')
+      end
+    end
+
+    should 'never update the resolved user' do
+      user = create_legacy_user login: 'readonly-no-update',
+                                mail: 'readonly-no-update@example.com',
+                                firstname: 'Stored First',
+                                lastname: 'Stored Last'
+
+      found_user = User.find_from_omniauth_saml saml_login: user.login,
+                                                first_name: 'Mapped First',
+                                                last_name: 'Mapped Last',
+                                                admin: true
+
+      assert_equal 'Stored First', found_user.firstname
+      assert_equal 'Stored Last', found_user.lastname
+      assert_not found_user.admin
+      assert_not found_user.changed?
+
+      user.reload
+      assert_equal 'Stored First', user.firstname
+      assert_equal 'Stored Last', user.lastname
+    end
+
+    should 'never run the on_login callback' do
+      user = create_legacy_user login: 'readonly-no-hook',
+                                mail: 'readonly-no-hook@example.com'
+      hook_calls = 0
+
+      with_on_login_callback proc { |_omniauth, _user| hook_calls += 1 } do
+        assert_equal user.id, User.find_from_omniauth_saml(saml_login: user.login).id
+      end
+
+      assert_equal 0, hook_calls
+    end
+  end
+
   private
 
   def legacy_attribute_mapping

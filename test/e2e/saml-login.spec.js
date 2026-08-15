@@ -8,6 +8,49 @@ const REDMINE_CALLBACK_PATH = '/auth/saml/callback';
 const REDMINE_ENTITY_ID = `${REDMINE_ORIGIN}/auth/saml/metadata`;
 const SAML_NAME_ID_FORMAT = 'urn:oasis:names:tc:SAML:2.0:nameid-format:persistent';
 
+const KEYCLOAK_USERNAME = 'samltest';
+const KEYCLOAK_PASSWORD = 'samltest-password';
+
+// A plain Redmine page that require_sudo_mode protects for any signed in user,
+// so Sudo Mode can be exercised by navigating rather than by submitting a form.
+const SUDO_PROTECTED_PATH = '/my/api_key';
+const SUDO_REAUTH_FORM = '#saml-sudo-reauth-form';
+
+// The Sudo Mode window the E2E workflow configures, in milliseconds. Redmine
+// only refreshes the window on requests that actually use Sudo Mode, so a
+// probe that still finds it active pushes it forward again; waiting for it to
+// lapse therefore has to probe more slowly than the window itself.
+const SUDO_WINDOW_MS = 10000;
+
+async function signInAtKeycloak(page) {
+  await page.locator('#username').fill(KEYCLOAK_USERNAME);
+  await page.locator('#password').fill(KEYCLOAK_PASSWORD);
+  await page.locator('#kc-login').click();
+}
+
+// Keycloak may answer a new AuthnRequest straight from its existing SSO
+// session, or ask for the credentials again. Both outcomes are correct, since
+// the plugin never asks for ForceAuthn, so whichever happens first decides.
+async function signInAtKeycloakIfPrompted(page, callbackRequestPromise) {
+  const promptShown = page.locator('#kc-login')
+    .waitFor({ state: 'visible' })
+    .then(() => true)
+    .catch(() => false);
+  const answeredFromSsoSession = callbackRequestPromise.then(() => false);
+
+  if (!await Promise.race([promptShown, answeredFromSsoSession])) {
+    return false;
+  }
+
+  await signInAtKeycloak(page);
+
+  return true;
+}
+
+async function openSudoProtectedPage(page) {
+  await page.goto(`${REDMINE_ORIGIN}${SUDO_PROTECTED_PATH}`, { waitUntil: 'domcontentloaded' });
+}
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -127,9 +170,7 @@ test('login to Redmine through real SAML IdP', async ({ page }) => {
   );
 
   const redmineCallbackPromise = page.waitForRequest(isRedmineSamlCallback);
-  await page.locator('#username').fill('samltest');
-  await page.locator('#password').fill('samltest-password');
-  await page.locator('#kc-login').click();
+  await signInAtKeycloak(page);
 
   const redmineCallback = await redmineCallbackPromise;
   expect(redmineCallback.method()).toBe('POST');
@@ -155,6 +196,100 @@ test('login to Redmine through real SAML IdP', async ({ page }) => {
   expect(redmineRequestPhaseCount).toBe(1);
 });
 
+test('confirm Redmine Sudo Mode through real SAML re-authentication', async ({ page }) => {
+  test.setTimeout(90000);
+
+  // A real SAML login, so the Redmine session is a SAML one.
+  await page.goto(`${REDMINE_ORIGIN}/login`, { waitUntil: 'commit' });
+  await expect(page).toHaveURL(
+    /127\.0\.0\.1:8080\/realms\/redmine-e2e/
+  );
+  await signInAtKeycloak(page);
+  await expect(page).toHaveURL(
+    /127\.0\.0\.1:3000\/my\/page/
+  );
+  await expect(
+    page.locator('div.flyout-menu__avatar a.user.active')
+  ).toHaveText('samltest');
+
+  // Signing in activates Sudo Mode, so the protected page opens right away.
+  await openSudoProtectedPage(page);
+  await expect(page).toHaveURL(`${REDMINE_ORIGIN}${SUDO_PROTECTED_PATH}`);
+  await expect(page.locator(SUDO_REAUTH_FORM)).toHaveCount(0);
+
+  // Then the Sudo Mode window lapses and the same page asks for confirmation.
+  await expect.poll(async () => {
+    await openSudoProtectedPage(page);
+
+    return page.locator(SUDO_REAUTH_FORM).count();
+  }, { intervals: [SUDO_WINDOW_MS + 1000], timeout: 60000 }).toBe(1);
+
+  // The SAML confirmation, not the local Redmine password prompt.
+  await expect(page.locator(SUDO_REAUTH_FORM)).toHaveAttribute('action', '/saml/sudo_reauth');
+  await expect(page.locator('input[name=sudo_password]')).toHaveCount(0);
+
+  const sudoAuthnRequestPromise = page.waitForRequest(
+    request => isKeycloakSamlRequest(request, 'SAMLRequest')
+  );
+  const sudoCallbackPromise = page.waitForRequest(isRedmineSamlCallback);
+
+  await page.locator(`${SUDO_REAUTH_FORM} button[type=submit]`).click();
+
+  // The confirmation reaches the real IdP as an ordinary AuthnRequest.
+  const sudoAuthnRequest = await sudoAuthnRequestPromise;
+  const sudoAuthnRequestXml = decodeRedirectMessage(
+    samlParameter(sudoAuthnRequest, 'SAMLRequest')
+  );
+  expect(sudoAuthnRequestXml).toMatch(/<(?:[\w-]+:)?AuthnRequest\b/);
+  expect(sudoAuthnRequestXml).toMatch(
+    new RegExp(`\\bAssertionConsumerServiceURL=['"]${escapeRegExp(REDMINE_ORIGIN + REDMINE_CALLBACK_PATH)}['"]`)
+  );
+  expect(sudoAuthnRequestXml).toMatch(
+    new RegExp(`<(?:[\\w-]+:)?Issuer[^>]*>${escapeRegExp(REDMINE_ENTITY_ID)}</(?:[\\w-]+:)?Issuer>`)
+  );
+  // The plugin adds no authentication condition of its own for a confirmation.
+  expect(sudoAuthnRequestXml).not.toMatch(/\bForceAuthn=/);
+  expect(sudoAuthnRequestXml).not.toMatch(/\bIsPassive=/);
+
+  const sudoRequestId = sudoAuthnRequestXml.match(/\bID=['"]([^'"]+)['"]/);
+  expect(sudoRequestId).not.toBeNull();
+  const sudoRelayState = samlParameter(sudoAuthnRequest, 'RelayState');
+  expect(sudoRelayState).toMatch(/^redmine_saml_sudo\//);
+
+  await signInAtKeycloakIfPrompted(page, sudoCallbackPromise);
+
+  // The IdP answers to the existing callback endpoint, for this AuthnRequest.
+  const sudoCallback = await sudoCallbackPromise;
+  expect(sudoCallback.method()).toBe('POST');
+  expect(samlParameter(sudoCallback, 'RelayState')).toBe(sudoRelayState);
+  const sudoResponseXml = decodePostMessage(
+    samlParameter(sudoCallback, 'SAMLResponse')
+  );
+  expect(sudoResponseXml).toMatch(/<(?:[\w-]+:)?Response\b/);
+  expect(sudoResponseXml).toMatch(/<(?:[\w-]+:)?Signature\b/);
+  expect(sudoResponseXml).toMatch(
+    new RegExp(`\\bDestination=['"]${escapeRegExp(REDMINE_ORIGIN + REDMINE_CALLBACK_PATH)}['"]`)
+  );
+  expect(sudoResponseXml).toMatch(
+    new RegExp(`\\bInResponseTo=['"]${escapeRegExp(sudoRequestId[1])}['"]`)
+  );
+
+  // Back in Redmine, as the same user and without an error.
+  await expect(page).toHaveURL(`${REDMINE_ORIGIN}/`);
+  await expect(
+    page.locator('div.flyout-menu__avatar a.user.active')
+  ).toHaveText('samltest');
+  // A rejected confirmation would land on the same page with this flash, so
+  // its absence is what separates success from rejection here.
+  await expect(page.locator('#flash_error')).toHaveCount(0);
+
+  // Sudo Mode is fresh again, so the protected page opens without a prompt.
+  await openSudoProtectedPage(page);
+  await expect(page).toHaveURL(`${REDMINE_ORIGIN}${SUDO_PROTECTED_PATH}`);
+  await expect(page.locator(SUDO_REAUTH_FORM)).toHaveCount(0);
+  await expect(page.locator('input[name=sudo_password]')).toHaveCount(0);
+});
+
 test('log out of Redmine and Keycloak through real SAML SLO', async ({ page }) => {
   test.setTimeout(60000);
 
@@ -164,9 +299,7 @@ test('log out of Redmine and Keycloak through real SAML SLO', async ({ page }) =
     /127\.0\.0\.1:8080\/realms\/redmine-e2e/
   );
 
-  await page.locator('#username').fill('samltest');
-  await page.locator('#password').fill('samltest-password');
-  await page.locator('#kc-login').click();
+  await signInAtKeycloak(page);
 
   await expect(page).toHaveURL(
     /127\.0\.0\.1:3000\/my\/page/

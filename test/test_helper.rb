@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require File.expand_path "#{File.dirname __FILE__}/../../../test/test_helper"
+require File.expand_path "#{File.dirname __FILE__}/support/saml_response_builder"
 
 module RedmineSaml
   module TestHelper
@@ -46,6 +47,21 @@ module RedmineSaml
 
     def restore_saml_configuration
       RedmineSaml.configured_saml.replace @saved_saml_configuration
+    end
+
+    # Runs the block against real, signed SAML Responses instead of the
+    # OmniAuth test mode, so the whole callback phase of omniauth-saml and
+    # ruby-saml is exercised.
+    def with_real_saml_responses
+      original_test_mode = OmniAuth.config.test_mode
+      save_saml_configuration
+      OmniAuth.config.test_mode = false
+      RedmineSaml.configured_saml.delete :idp_cert_fingerprint
+      RedmineSaml.configured_saml.merge! RedmineSaml::SamlResponseBuilder.settings_overrides
+      yield
+    ensure
+      OmniAuth.config.test_mode = original_test_mode
+      restore_saml_configuration
     end
 
     def with_forgery_protection
