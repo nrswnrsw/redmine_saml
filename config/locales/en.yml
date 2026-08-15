@@ -1,5 +1,7 @@
 en:
+  button_saml_sudo_continue: Continue and submit
   button_saml_sudo_reauth: Confirm with SSO
+  button_saml_sudo_resume: Restore my input
   error_saml_authenticity_error: SAML authentication error
   error_saml_invalid_ticket: Invalid SAML ticket
   error_saml_sudo_reauth_failed: SSO confirmation failed. Please try again.
@@ -8,14 +10,23 @@ en:
   label_replace_redmine_login: Replace Redmine login page
   label_saml_enabled: Enable SAML authentication
   label_saml_login_label: Login page text
+  label_saml_sudo_continue_required: Continue your unsaved changes
   label_saml_sudo_reauth_button_label: Sudo Mode confirmation button label
   label_saml_sudo_reauth_required: Confirm your identity to continue
   label_saml_sudo_reauth_text: Sudo Mode confirmation text
   label_saml_sudo_reauth_title: Sudo Mode confirmation heading
+  label_saml_sudo_resume_required: Restoring your unsaved changes
   label_saml_test_plural: Tests
   saml_login_label: Login with SSO
   text_full_logout_proposal: You may want to %{value} before trying an other username.
   text_logout_from_saml: close SSO session
+  text_saml_sudo_continue_info: >-
+    Your identity was confirmed and the input of the page you submitted was
+    restored below. Nothing has been changed yet: continue to submit it.
+  text_saml_sudo_continue_reconfirm: >-
+    The input of the page you submitted was restored below and nothing has been
+    changed yet. The confirmation is no longer valid, so continuing asks you to
+    confirm your identity once more.
   text_saml_sudo_reauth_customization: >-
     Optional plain text. Leave blank to keep the default wording of the current
     language.
@@ -23,3 +34,11 @@ en:
     This action requires you to confirm your identity. You are signed in with SSO,
     so the confirmation is done by your identity provider. You stay signed in to
     Redmine, and you may have to repeat the action afterwards.
+  text_saml_sudo_resume_info: >-
+    The input of the page you submitted is kept in this browser tab only, and is
+    being restored now. If nothing happens it is no longer available, and you can
+    return to the previous page.
+  text_saml_sudo_resume_unavailable: >-
+    The input of the page you submitted could not be restored. It is only kept in
+    the browser tab it was submitted from, and only for a short time. Nothing has
+    been changed.

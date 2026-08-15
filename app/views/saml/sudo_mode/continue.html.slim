@@ -1,0 +1,20 @@
+h2 = l :label_saml_sudo_continue_required
+
+p.nodata style="font-size: 1em;"
+  = @saml_sudo_confirmed ? l(:text_saml_sudo_continue_info) : l(:text_saml_sudo_continue_reconfirm)
+
+/ Forgets the restored continuation, so returning to the resume page does not
+/ offer the same input a second time.
+- content_for :header_tags do
+  = javascript_include_tag 'saml_sudo_continuation', plugin: 'redmine_saml'
+
+#saml-sudo-continue data-saml-sudo-forget-key=@saml_sudo_continuation_key
+  / An ordinary Redmine form: the original method and fields, a fresh CSRF
+  / token from form_tag, and nothing that could submit it but the user. This is
+  / the same shape Redmine's own Sudo Mode prompt resubmits with.
+  = form_tag @saml_sudo_continuation_path, method: :post, id: 'saml-sudo-continue-form' do
+    = hidden_field_tag '_method', @saml_sudo_continuation_method
+    = hash_to_hidden_fields @saml_sudo_continuation_fields
+    p.buttons
+      = submit_tag l(:button_saml_sudo_continue)
+      = link_to l(:button_cancel), @saml_sudo_back_url

@@ -21,7 +21,7 @@ module RedmineSaml
                       only: %i[login_with_saml_redirect login_with_saml_callback redirect_after_saml_logout]
         before_action :verify_authenticity_token,
                       except: %i[login_with_saml_callback redirect_after_saml_logout]
-        before_action :require_saml_sudo_reauth_available, only: %i[saml_sudo_reauth]
+        before_action :require_saml_sudo_reauth_available, only: %i[saml_sudo_reauth saml_sudo_resume]
       end
 
       module InstanceOverwriteMethods
@@ -88,6 +88,39 @@ module RedmineSaml
           session.delete RedmineSaml::SudoReauth::SESSION_KEY
           logger.warn "SAML sudo re-authentication could not be started: #{e.class}"
           redirect_to home_path
+        end
+
+        # Offers the input of the request that triggered a Sudo confirmation
+        # back to the user after the IdP round trip.
+        #
+        # This action never changes anything and is never a decision about
+        # whether the original request may run. It reads the continuation the
+        # browser kept, in this browser tab only, and renders the input back as
+        # an ordinary Redmine form. Submitting that form is a separate, explicit
+        # user action which produces a normal Redmine request: it carries a
+        # fresh CSRF token and passes through Redmine's own Sudo Mode check
+        # again, so a successful SAML callback is on its own never a reason for
+        # anything to be changed.
+        def saml_sudo_resume
+          return head :method_not_allowed unless %w[GET POST].include? request.request_method
+
+          @saml_sudo_back_url = validate_back_url(params[:back_url].to_s) || home_path
+          @saml_sudo_continuation_key = saml_sudo_continuation_key
+          no_store
+          return render 'saml/sudo_mode/resume' if request.request_method == 'GET'
+
+          continuation = RedmineSaml::SudoContinuation.load params[:continuation],
+                                                            user_id: User.current.id,
+                                                            session_secret: saml_sudo_continuation_secret
+          return render_saml_sudo_resume_unavailable if continuation.blank?
+
+          @saml_sudo_continuation_method = continuation['request_method']
+          @saml_sudo_continuation_path = continuation['path']
+          @saml_sudo_continuation_fields = ActionController::Parameters.new continuation['fields']
+          # Read only: what the resumed request is allowed to do is decided by
+          # Redmine's own Sudo Mode when that request arrives, not here.
+          @saml_sudo_confirmed = sudo_timestamp_valid?
+          render 'saml/sudo_mode/continue'
         end
 
         def login_with_saml_callback
@@ -613,6 +646,29 @@ module RedmineSaml
         def saml_sudo_reauth_return_path(state)
           return_url = state.is_a?(Hash) ? state['return_url'] : nil
           validate_back_url(return_url.to_s) || home_path
+        end
+
+        # The sessionStorage key of the continuation this page is about. It is
+        # a storage identifier rather than a secret, but only the generated
+        # shape is ever echoed back into the page.
+        def saml_sudo_continuation_key
+          key = params[:key].to_s
+          key if RedmineSaml::SudoContinuation.key? key
+        end
+
+        # The continuation is bound to this secret, so a continuation of another
+        # login session is rejected even for the same user. Read only here: a
+        # session that never created one simply has nothing to resume.
+        def saml_sudo_continuation_secret
+          session[RedmineSaml::SudoContinuation::SESSION_KEY]
+        end
+
+        # Rendered without the restore script, so a continuation that cannot be
+        # read never puts the page into a submit loop.
+        def render_saml_sudo_resume_unavailable
+          @saml_sudo_continuation_unavailable = true
+          logger.info 'SAML sudo continuation could not be restored'
+          render 'saml/sudo_mode/resume'
         end
 
         def active_saml_logout_session?

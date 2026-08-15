@@ -16,4 +16,11 @@ Rails.application.routes.draw do
   # claim this path in its request, callback or other phase.
   post '/saml/sudo_reauth' => 'account#saml_sudo_reauth',
        as: :saml_sudo_reauth
+  # Offers the input of the request that triggered the confirmation back to the
+  # user after the IdP round trip. It never changes anything itself: GET renders
+  # the page that restores the continuation the browser kept, POST renders that
+  # input back as an ordinary Redmine form for the user to submit.
+  match '/saml/sudo_resume' => 'account#saml_sudo_resume',
+        as: :saml_sudo_resume,
+        via: %i[get post]
 end

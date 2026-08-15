@@ -32,12 +32,58 @@ module RedmineSaml
           # inside an action, but not when called from a before_action
           no_store
           respond_to do |format|
-            format.html { render 'saml/sudo_mode/new' }
-            format.js   { render 'saml/sudo_mode/new' }
+            format.html do
+              prepare_saml_sudo_continuation
+              render 'saml/sudo_mode/new'
+            end
+            # The modal is reached from a remote form, which this confirmation
+            # cannot resume: the tab navigates away to the IdP, so the page that
+            # would receive the XHR response no longer exists when it returns.
+            # It therefore keeps the 1.2.0 behaviour and offers no continuation.
+            format.js { render 'saml/sudo_mode/new' }
           end
         end
 
         private
+
+        # Seals the fields Redmine::SudoMode selected for this request into one
+        # opaque string for the browser to keep across the IdP round trip, and
+        # sends the transaction back to the resume page instead of straight to
+        # the back URL.
+        #
+        # Nothing is stored server side and the Sudo transaction itself is
+        # untouched. Losing a draft is a far better outcome than failing the
+        # confirmation, so anything unexpected here simply falls back to the
+        # 1.2.0 behaviour of returning without the input.
+        def prepare_saml_sudo_continuation
+          return unless RedmineSaml::SudoContinuation.resumable_method? request.request_method
+
+          fields = RedmineSaml::SudoContinuation.serializable_fields @sudo_form.original_fields
+          return if fields.blank?
+
+          continuation = RedmineSaml::SudoContinuation.dump user_id: User.current.id,
+                                                            session_secret: saml_sudo_continuation_secret,
+                                                            request_method: request.request_method,
+                                                            path: request.path,
+                                                            fields: fields
+          return if continuation.blank?
+
+          @saml_sudo_continuation = continuation
+          @saml_sudo_continuation_key = RedmineSaml::SudoContinuation.generate_key
+          @saml_sudo_return_url = saml_sudo_resume_path key: @saml_sudo_continuation_key,
+                                                        back_url: @saml_sudo_return_url
+        rescue StandardError => e
+          logger.warn "SAML sudo continuation skipped: #{e.class}"
+          @saml_sudo_continuation = nil
+          @saml_sudo_continuation_key = nil
+        end
+
+        # Per login session secret a continuation is bound to. Created on first
+        # use, so a Redmine that never shows a SAML Sudo confirmation never
+        # stores it, and dropped with the rest of the session by reset_session.
+        def saml_sudo_continuation_secret
+          session[RedmineSaml::SudoContinuation::SESSION_KEY] ||= RedmineSaml::SudoContinuation.generate_secret
+        end
 
         # The original request is not replayed after the IdP round trip, so the
         # user is returned to a safe GET URL and repeats the action there. The

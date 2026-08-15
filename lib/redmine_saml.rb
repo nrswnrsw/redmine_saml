@@ -6,6 +6,7 @@ require_relative 'redmine_saml/slo_cookie'
 require_relative 'redmine_saml/slo_post_signature'
 require_relative 'redmine_saml/sudo_context'
 require_relative 'redmine_saml/sudo_token_store'
+require_relative 'redmine_saml/sudo_continuation'
 require_relative 'redmine_saml/sudo_reauth'
 
 module RedmineSaml

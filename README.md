@@ -250,6 +250,24 @@ All three are **optional** and blank by default:
 - The values are **plain text**. HTML is not interpreted: it is escaped and shown as the characters that were entered.
 - This applies to the SAML confirmation prompt only, in both its page and modal form. The local Redmine password prompt and the SAML login page are unaffected.
 
+Keeping what you typed:
+
+Redmine's own password prompt keeps the fields of the request it interrupted in hidden fields of that same page. A SAML confirmation leaves Redmine for the IdP, so that page is gone when you come back. To avoid losing a form you spent a long time on, the fields Redmine already selected for its own prompt are sealed into one opaque value that your browser keeps in the `sessionStorage` of that one tab while it visits the IdP. When you return, Redmine offers them back on a resume page and you press a button to submit them.
+
+This needs no configuration and adds no setting, no migration and no server-side storage.
+
+- **The confirmation never submits anything for you.** Coming back from the IdP only refreshes the Sudo Mode timestamp, exactly as before. The restored form is an ordinary Redmine form with a fresh CSRF token, and submitting it is a separate, explicit action of yours. A repeated or replayed SAML callback, or a reloaded page, therefore cannot cause the original change to happen.
+- **The resumed request is checked like any other request.** It passes through Redmine's own Sudo Mode check again, so a successful SAML confirmation is never by itself the reason a change is allowed. If the confirmation lapsed again in the meantime, Redmine simply asks once more and the input is kept again.
+- **The sealed value is unreadable and unforgeable outside your session.** It is encrypted and authenticated with `ActiveSupport::MessageEncryptor` using a key derived from your Redmine `secret_key_base`, and it is bound to the user and the login session that created it, with an expiry of 15 minutes. A modified, expired or foreign value is refused and nothing is restored.
+- **It is per tab and short lived.** Each confirmation gets its own storage key, so two tabs never overwrite each other's input, and the browser drops everything when the tab closes.
+
+Limitations, in all of which the behaviour is simply the one from 1.2.0, with nothing changed and nothing restored:
+
+- The input is kept for `POST`, `PUT`, `PATCH` and `DELETE` requests only. A `GET` has nothing worth keeping and its path is untouched.
+- It needs JavaScript and a usable `sessionStorage`. Where either is unavailable the resume page says so and offers a link back, rather than failing.
+- The Sudo modal shown for remote (XHR) forms is not resumed. The tab navigates away to the IdP, so the page that would have received the response no longer exists when it returns.
+- A raw multipart file upload is not continued. Redmine's normal attachment flow uploads files before the form is submitted and sends only their tokens, which are kept like any other field; the raw-upload fallback used when JavaScript is off is refused rather than sealed into a browser store.
+
 Details worth knowing:
 
 - The transaction only refreshes the Sudo Mode timestamp. It never signs the user in again: the Redmine session, its session token, the autologin cookie and `last_login_on` are untouched, and the SAML `on_login` hook and on-the-fly user creation do not run. A SAML identity the confirmation response does not carry is kept as it was, so a confirmation never degrades the NameID or SessionIndex of the session.

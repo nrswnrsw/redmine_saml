@@ -41,9 +41,25 @@ class SamlSudoModeTest < Redmine::IntegrationTest
     assert_response :success
     assert_select 'form#saml-sudo-reauth-form[action=?]', '/saml/sudo_reauth'
     assert_select 'input[name=sudo_password]', 0
-    assert_select 'form#saml-sudo-reauth-form input[name=?][value=?]', 'back_url', '/roles/new'
+    # This request carried input, so the transaction returns through the resume
+    # page, which keeps the validated back URL of the original request.
+    back_url = css_select('form#saml-sudo-reauth-form input[name=back_url]').first['value']
+    assert_equal '/saml/sudo_resume', back_url.split('?').first
+    assert_equal '/roles/new', Rack::Utils.parse_query(back_url.split('?').last)['back_url']
     assert_includes @response.headers['Cache-Control'], 'no-store'
     assert_nil Role.find_by(name: 'a new role')
+  end
+
+  test 'returns straight to the back URL when the request carried no input' do
+    saml_login
+    expire_sudo_mode!
+
+    # A GET has nothing to continue, so nothing about this path changes.
+    get '/settings/plugin/redmine_saml', headers: { 'HTTP_REFERER' => '/admin' }
+
+    assert_response :success
+    assert_select 'form#saml-sudo-reauth-form input[name=?][value=?]', 'back_url', '/admin'
+    assert_select 'form#saml-sudo-reauth-form[data-saml-sudo-stash]', 0
   end
 
   test 'offers SAML re-authentication in the modal for an XHR request' do
