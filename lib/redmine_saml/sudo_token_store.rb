@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'sudo_context'
+require_relative 'sudo_session'
 
 module RedmineSaml
   # Server side single use marker for a SAML Sudo re-authentication
@@ -42,26 +43,75 @@ module RedmineSaml
     # tokens.value is a unique column of 40 characters, which is also the
     # length Token.generate_token_value produces.
     REQUEST_VALUE_LENGTH = 40
+    LOCK_VALUE_LENGTH = REQUEST_VALUE_LENGTH
 
     class << self
       def register_action!
+        # max_instances is what Token#delete_previous_tokens evicts by, and it
+        # evicts by user and action alone, which would let one login session
+        # drop the transaction of another login session of the same user. No
+        # row here is ever created through that callback: both actions are
+        # inserted directly, so the eviction never runs and the scope of a
+        # transaction is its login session, not its user. The option is
+        # registered only because Token#max_instances would otherwise be nil.
+        # validity_time is the part that matters: it lets Token.destroy_expired
+        # prune expired entries with everything else.
         Token.add_action ACTION,
                          max_instances: MAX_INSTANCES,
                          validity_time: proc { TRANSACTION_VALIDITY }
-        # max_instances is what Token#delete_previous_tokens evicts by, which
-        # a registry entry must never be subject to, so it is registered only
-        # because Token#max_instances would otherwise be nil. Registry entries
-        # are inserted without that callback, see register_request.
-        # validity_time is the part that matters here: it lets
-        # Token.destroy_expired prune expired entries with everything else.
         Token.add_action REQUEST_ACTION,
                          max_instances: MAX_INSTANCES,
                          validity_time: proc { REQUEST_VALIDITY }
       end
 
-      def create_transaction(user)
+      # Acquires the one Sudo transaction of a Redmine login session.
+      #
+      # tokens.value carries a unique index in every supported Redmine schema,
+      # so inserting the login session lock value is an atomic acquisition on
+      # every database Redmine supports: of any number of genuinely concurrent
+      # requests exactly one inserts the row and every other one is refused by
+      # the database. No advisory lock, no database specific feature, no new
+      # table and nothing that depends on the session cookie, which the client
+      # controls the delivery of and which cannot arbitrate between two
+      # requests that both read the same snapshot.
+      #
+      # Scoping the value to the login session rather than to the user is what
+      # keeps two login sessions of one user independent: their lock values
+      # differ, so neither can evict the transaction of the other.
+      #
+      # Returns the Token when this caller acquired the transaction, or nil
+      # when another request of the same login session already holds it.
+      def acquire_transaction(user, session, now: Time.current)
         register_action!
-        Token.create! user_id: user.id, action: ACTION
+        value = SudoSession.lock_value session, length: LOCK_VALUE_LENGTH
+        return create_transaction user, now: now if value.blank?
+
+        # An expired lock of this very login session is cleared first. It is a
+        # conditional DELETE, so any number of concurrent callers may run it
+        # and at most one of them still wins the INSERT below.
+        expire_lock value, now: now
+        insert_token user, value, now: now
+      rescue ActiveRecord::RecordNotUnique
+        nil
+      end
+
+      # True while this login session holds a Sudo transaction, read from the
+      # server side rather than from the session, so a tab whose cookie does
+      # not know about a concurrently started transaction still sees it.
+      def transaction_pending?(session, now: Time.current)
+        value = SudoSession.lock_value session, length: LOCK_VALUE_LENGTH
+        return false if value.blank?
+
+        Token.where(action: ACTION, value: value)
+             .exists?(created_on: (now - TRANSACTION_VALIDITY)..)
+      end
+
+      # Fallback for a session that carries no Redmine session token. Inserted
+      # without callbacks like every other row here, so that it can never evict
+      # the transaction of another login session of the same user.
+      def create_transaction(user, now: Time.current)
+        register_action!
+        insert_token user, Token.generate_token_value, now: now
       end
 
       # Records that this AuthnRequest ID belongs to a Sudo transaction.
@@ -132,6 +182,18 @@ module RedmineSaml
       # rubocop:enable Naming/PredicateMethod
 
       private
+
+      def insert_token(user, value, now: Time.current)
+        Token.insert!({ user_id: user.id, action: ACTION, value: value,
+                        created_on: now, updated_on: now })
+        Token.find_by action: ACTION, value: value
+      end
+
+      def expire_lock(value, now: Time.current)
+        Token.where(action: ACTION, value: value)
+             .where(created_on: ...(now - TRANSACTION_VALIDITY))
+             .delete_all
+      end
 
       def cleanup_expired_requests(user, now: Time.current)
         Token.where(user_id: user.id, action: REQUEST_ACTION)

@@ -611,6 +611,10 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
     assert_equal last_login_on, @user.reload.last_login_on
   end
 
+  # A callback that loses the single conditional DELETE must leave the session
+  # completely alone. Another request of the same login session owns the
+  # transaction and is refreshing the Sudo timestamp for it, so anything this
+  # response wrote would be a stale snapshot that rolls that back.
   test 'lets only one of two sudo callbacks for the same transaction succeed' do
     establish_saml_session
     transaction = start_sudo_transaction
@@ -618,12 +622,22 @@ class AccountSamlSudoTest < RedmineSaml::ControllerTest
     post_sudo_callback transaction
     assert_response :redirect
     assert_nil flash[:error]
+    sudo_timestamp = session[:sudo_timestamp]
+    saml_uid = session['saml_uid']
 
     # Restore the session side state so only the server side marker can decide.
     session[RedmineSaml::SudoReauth::SESSION_KEY] = transaction[:context]
     post_sudo_callback transaction
 
-    assert_sudo_rejected
+    assert_response :redirect
+    assert @controller.request.session_options[:skip],
+           'the losing callback must not commit the session at all'
+    assert_nil flash[:error], 'the losing callback must not write a flash either'
+    assert_equal sudo_timestamp, session[:sudo_timestamp],
+                 'the losing callback must not roll back the Sudo timestamp of the winner'
+    assert_equal saml_uid, session['saml_uid']
+    assert_saml_login_session_intact
+    assert_equal 0, Token.where(action: RedmineSaml::SudoTokenStore::ACTION).count
   end
 
   test 'rejects a sudo callback for a different Redmine user without replacing the session' do

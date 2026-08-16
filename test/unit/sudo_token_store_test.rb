@@ -87,12 +87,117 @@ class SudoTokenStoreTest < RedmineSaml::TestCase
     assert_not RedmineSaml::SudoTokenStore.destroy_transaction(nil)
   end
 
-  test 'starting a new transaction supersedes the previous one for the same user' do
-    first = RedmineSaml::SudoTokenStore.create_transaction @user
-    second = RedmineSaml::SudoTokenStore.create_transaction @user
+  # ---------------------------------------------------------------------------
+  # One transaction per Redmine login session
+  # ---------------------------------------------------------------------------
+  #
+  # The scope of a Sudo transaction is one login session, not one user: two
+  # browsers or devices of the same user each get their own, and neither may
+  # drop the other's. Within one login session there is exactly one, and which
+  # request gets it is decided by the unique index on tokens.value.
 
-    assert_not Token.exists?(first.id)
+  test 'gives one login session exactly one transaction' do
+    session = login_session 'tk-a'
+
+    first = RedmineSaml::SudoTokenStore.acquire_transaction @user, session
+    second = RedmineSaml::SudoTokenStore.acquire_transaction @user, session
+
+    assert first, 'the first request has to acquire the transaction'
+    assert_nil second, 'a second request of the same login session must not acquire one'
+    assert Token.exists?(first.id)
+    assert_equal 1, sudo_transaction_count
+  end
+
+  test 'lets the database refuse the second transaction of one login session' do
+    session = login_session 'tk-a'
+    RedmineSaml::SudoTokenStore.acquire_transaction @user, session
+    value = RedmineSaml::SudoSession.lock_value session,
+                                                length: RedmineSaml::SudoTokenStore::LOCK_VALUE_LENGTH
+
+    # The refusal comes from the unique index rather than from a check, which
+    # is what makes it hold for genuinely concurrent requests as well.
+    assert_raises ActiveRecord::RecordNotUnique do
+      Token.insert!({ user_id: @user.id, action: RedmineSaml::SudoTokenStore::ACTION,
+                      value: value, created_on: Time.current, updated_on: Time.current })
+    end
+  end
+
+  test 'lets only one of two concurrent acquisitions of one login session win' do
+    session = login_session 'tk-a'
+    competitor = nil
+    raced = false
+
+    # A deterministic race window instead of a sleep: the competing request
+    # runs its whole acquisition after this one has looked at the table and
+    # before it inserts. That is exactly the interleaving a check against the
+    # session cookie cannot survive, because both requests read the same
+    # cookie snapshot and both would pass it.
+    RedmineSaml::SudoTokenStore.stubs(:expire_lock).with do
+      unless raced
+        raced = true
+        competitor = RedmineSaml::SudoTokenStore.acquire_transaction @user, session
+      end
+      true
+    end
+
+    first = RedmineSaml::SudoTokenStore.acquire_transaction @user, session
+
+    assert raced, 'the race window must have been entered'
+    assert_equal 1, [first, competitor].compact.size,
+                 'exactly one of two concurrent acquisitions may win'
+    assert_equal 1, sudo_transaction_count
+  end
+
+  test 'keeps the transactions of two login sessions of one user independent' do
+    first = RedmineSaml::SudoTokenStore.acquire_transaction @user, login_session('tk-a')
+    second = RedmineSaml::SudoTokenStore.acquire_transaction @user, login_session('tk-b')
+
+    assert first
+    assert second, 'another login session of the same user must get its own transaction'
+    assert Token.exists?(first.id), 'a second login session must not drop the first transaction'
     assert Token.exists?(second.id)
+    assert_equal 2, sudo_transaction_count
+  end
+
+  test 'lets a login session start again once its transaction expired' do
+    session = login_session 'tk-a'
+    first = RedmineSaml::SudoTokenStore.acquire_transaction @user, session
+
+    travel_to RedmineSaml::SudoTokenStore::TRANSACTION_VALIDITY.from_now + 1.second do
+      second = RedmineSaml::SudoTokenStore.acquire_transaction @user, session
+
+      assert second, 'an expired transaction must not wedge the login session'
+      assert_not Token.exists?(first.id)
+      assert_equal 1, sudo_transaction_count
+    end
+  end
+
+  test 'reports whether this login session holds a transaction' do
+    session = login_session 'tk-a'
+
+    assert_not RedmineSaml::SudoTokenStore.transaction_pending?(session)
+
+    context = build_context RedmineSaml::SudoTokenStore.acquire_transaction(@user, session)
+
+    assert RedmineSaml::SudoTokenStore.transaction_pending?(session)
+    assert_not RedmineSaml::SudoTokenStore.transaction_pending?(login_session('tk-b')),
+               'another login session must not see this transaction'
+    assert_not RedmineSaml::SudoTokenStore.transaction_pending?({}),
+               'a session without a Redmine session token holds nothing'
+
+    assert RedmineSaml::SudoTokenStore.consume_transaction(context)
+    assert_not RedmineSaml::SudoTokenStore.transaction_pending?(session)
+  end
+
+  test 'falls back to a transaction of its own without a Redmine session token' do
+    first = RedmineSaml::SudoTokenStore.acquire_transaction @user, {}
+    second = RedmineSaml::SudoTokenStore.acquire_transaction @user, {}
+
+    assert first
+    assert second
+    assert Token.exists?(first.id),
+           'the fallback must not evict the transaction of another login session'
+    assert_equal 2, sudo_transaction_count
   end
 
   test 'does not consume Redmine session Tokens' do
@@ -228,6 +333,16 @@ class SudoTokenStoreTest < RedmineSaml::TestCase
   end
 
   private
+
+  # A Redmine login session is identified by session[:tk], the session token
+  # Redmine issues in start_user_session.
+  def login_session(token)
+    { tk: token }
+  end
+
+  def sudo_transaction_count
+    Token.where(action: RedmineSaml::SudoTokenStore::ACTION).count
+  end
 
   def build_context(token)
     RedmineSaml::SudoContext.build(

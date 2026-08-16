@@ -78,11 +78,12 @@ module RedmineSaml
           @saml_sudo_continuation_key = nil
         end
 
-        # Per login session secret a continuation is bound to. Created on first
-        # use, so a Redmine that never shows a SAML Sudo confirmation never
-        # stores it, and dropped with the rest of the session by reset_session.
+        # Per login session secret a continuation is bound to. Derived from the
+        # Redmine session token, so it is the same for every tab of one login
+        # session even when they ask for it at the very same moment, differs
+        # between login sessions, and is never stored anywhere.
         def saml_sudo_continuation_secret
-          session[RedmineSaml::SudoContinuation::SESSION_KEY] ||= RedmineSaml::SudoContinuation.generate_secret
+          RedmineSaml::SudoContinuation.session_secret session
         end
 
         # The original request is not replayed after the IdP round trip, so the

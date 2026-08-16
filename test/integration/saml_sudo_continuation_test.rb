@@ -505,6 +505,138 @@ class SamlSudoContinuationTest < Redmine::IntegrationTest
     assert Role.find_by(name: 'retry role from tab B')
   end
 
+  # The scope of a pending transaction is one Redmine login session, not one
+  # user: a second browser or device of the same user must be able to confirm
+  # independently, and neither may drop the transaction of the other.
+  test 'keeps two login sessions of one user independent' do
+    saml_login
+    other_browser = open_session
+    other_browser.post RedmineSaml::CALLBACK_PATH
+    assert_equal users(:users_001).id, other_browser.session[:user_id]
+    assert_not_equal session[:tk], other_browser.session[:tk],
+                     'a second login session must have its own Redmine session token'
+
+    # One clock for both, so neither transaction expires while the other starts.
+    expire_sudo_mode!
+
+    first = submit_protected_form role_name: 'role from browser A'
+    post '/saml/sudo_reauth', params: { back_url: first[:back_url] }
+    assert_response :redirect
+    first_idp_location = response.location
+    first_transactions = sudo_transaction_count
+
+    other_browser.post '/roles',
+                       params: { role: ROLE_PARAMS.merge(name: 'role from browser B') },
+                       headers: { 'HTTP_REFERER' => '/roles/new' }
+    other_browser.assert_response :success
+    second = stashed_continuation_of other_browser
+
+    other_browser.post '/saml/sudo_reauth', params: { back_url: second[:back_url] }
+
+    other_browser.assert_response :redirect
+    # Its own AuthnRequest to the IdP, not the redirect a follower of an
+    # already pending transaction would get.
+    assert_equal RedmineSaml.configured_saml[:idp_sso_service_url],
+                 other_browser.response.location.split('?').first,
+                 'a second login session must start its own transaction'
+    second_idp_location = other_browser.response.location
+    assert_equal first_transactions + 1, sudo_transaction_count,
+                 'both login sessions must hold a transaction at the same time'
+
+    # Neither transaction was cancelled by the other, so both complete: each
+    # login session confirms and continues its own request independently.
+    assert_difference 'Role.count', 2 do
+      complete_continuation integration_session, first, first_idp_location
+      complete_continuation other_browser, second, second_idp_location
+    end
+
+    assert Role.find_by(name: 'role from browser A')
+    assert Role.find_by(name: 'role from browser B')
+  end
+
+  # The start side of the same problem: both tabs of a simultaneous start read
+  # the same session snapshot, and the follower only reads from it. The cookie
+  # store commits a merely loaded session, so a follower response that arrived
+  # last would put back the snapshot from before the winner stored its Sudo
+  # context and lose the transaction that was just started.
+  test 'never lets a follower of a started transaction send back a stale session cookie' do
+    saml_login
+    expire_sudo_mode!
+    stash = submit_protected_form
+
+    # The snapshot both tabs share before either of them started a transaction.
+    stale_cookie = session_cookie
+    assert stale_cookie.present?
+
+    post '/saml/sudo_reauth', params: { back_url: stash[:back_url] }
+    assert_response :redirect
+    assert_equal RedmineSaml.configured_saml[:idp_sso_service_url], response.location.split('?').first,
+                 'the winner has to start the transaction'
+    idp_location = response.location
+    winner_context = session[RedmineSaml::SudoReauth::SESSION_KEY].to_h.deep_stringify_keys
+    transactions = sudo_transaction_count
+    requests = sudo_request_count
+
+    # The second tab starts from the snapshot it still holds, exactly as a
+    # genuinely simultaneous request would.
+    follower = open_session
+    follower.cookies[session_cookie_name] = stale_cookie
+    follower.post '/saml/sudo_reauth', params: { back_url: stash[:back_url] }
+
+    follower.assert_response :redirect
+    assert_no_session_cookie follower.response
+    assert_equal stash[:back_url], relative_location(follower.response.location),
+                 'the follower has to return to its own resume page'
+    assert_equal transactions, sudo_transaction_count, 'the follower must not start a second transaction'
+    assert_equal requests, sudo_request_count, 'the follower must not issue a second AuthnRequest'
+    assert_equal winner_context, session[RedmineSaml::SudoReauth::SESSION_KEY].to_h.deep_stringify_keys,
+                 'the Sudo context of the winner has to survive the follower'
+    assert RedmineSaml::SudoTokenStore.valid_transaction(winner_context),
+           'the transaction of the winner has to survive the follower'
+
+    # And the winner still completes normally.
+    post RedmineSaml::CALLBACK_PATH, params: { RelayState: relay_state_of(idp_location) }
+    assert_response :redirect
+    open_resume_page response.location
+    restore_continuation stash[:value]
+
+    assert_difference('Role.count', 1) { submit_continue_form }
+    assert Role.find_by(name: 'a new role')
+  end
+
+  # Finding 3 at the level it actually bites: a second tab that still holds the
+  # cookie snapshot from before the winning callback committed. Its response
+  # must not send a session cookie at all, because the browser keeps the last
+  # one it receives and would otherwise lose the winner's Sudo timestamp.
+  test 'never lets a losing callback send back a stale session cookie' do
+    saml_login
+    expire_sudo_mode!
+    stash = submit_protected_form
+    post '/saml/sudo_reauth', params: { back_url: stash[:back_url] }
+    assert_response :redirect
+    relay_state = relay_state_of response.location
+
+    # The snapshot a genuinely concurrent second tab would still be holding.
+    stale_cookie = session_cookie
+    assert stale_cookie.present?
+
+    post RedmineSaml::CALLBACK_PATH, params: { RelayState: relay_state }
+    assert_response :redirect
+    assert session[:sudo_timestamp].present?, 'the winner has to refresh the Sudo timestamp'
+    winner_cookie = session_cookie
+    assert_not_equal stale_cookie, winner_cookie
+
+    loser = open_session
+    loser.cookies[session_cookie_name] = stale_cookie
+    loser.post RedmineSaml::CALLBACK_PATH, params: { RelayState: relay_state }
+
+    loser.assert_response :redirect
+    assert_no_session_cookie loser.response
+    assert_equal winner_cookie, session_cookie,
+                 'the winner session cookie must survive the losing callback'
+    assert_nil Role.find_by(name: 'a new role'), 'and nothing may have been changed'
+  end
+
   test 'starts a fresh transaction after the pending transaction expires' do
     saml_login
     expire_sudo_mode!
@@ -546,32 +678,43 @@ class SamlSudoContinuationTest < Redmine::IntegrationTest
     # Redmine's own prompt keeps the input in hidden fields of the same page.
     assert_select 'input[name=?][value=?]', 'role[name]', 'a new role'
     assert_select 'form[data-saml-sudo-stash]', 0
-    assert_nil session[RedmineSaml::SudoContinuation::SESSION_KEY]
+    assert_no_continuation_session_state
   end
 
   test 'never stores continuation state for a normal SAML login' do
     saml_login
 
-    assert_nil session[RedmineSaml::SudoContinuation::SESSION_KEY]
+    assert_no_continuation_session_state
 
     get '/logout'
     post '/logout'
 
-    assert_nil session[RedmineSaml::SudoContinuation::SESSION_KEY]
+    assert_no_continuation_session_state
   end
 
-  test 'stores continuation state only once a continuation is created' do
+  # The binding secret is derived from the Redmine session token rather than
+  # written into the session, so this feature stores nothing there at any point
+  # and two concurrent tabs derive the same secret instead of racing to write
+  # different ones.
+  test 'stores no continuation state in the session at any point' do
     saml_login
     expire_sudo_mode!
+    assert_no_continuation_session_state
 
     # A GET has nothing to continue.
     get '/settings/plugin/redmine_saml', headers: { 'HTTP_REFERER' => '/admin' }
     assert_select 'form#saml-sudo-reauth-form'
-    assert_nil session[RedmineSaml::SudoContinuation::SESSION_KEY]
+    assert_no_continuation_session_state
 
-    submit_protected_form
+    stash = submit_protected_form
+    assert stash[:value].present?
+    assert_no_continuation_session_state
 
-    assert session[RedmineSaml::SudoContinuation::SESSION_KEY].present?
+    open_resume_page confirm_with_idp(stash)
+    restore_continuation stash[:value]
+
+    assert_select 'form#saml-sudo-continue-form'
+    assert_no_continuation_session_state
   end
 
   test 'refuses the resume page without an active SAML session' do
@@ -602,8 +745,52 @@ class SamlSudoContinuationTest < Redmine::IntegrationTest
     stashed_continuation
   end
 
+  # Selecting straight from the response body, so that these helpers work for
+  # any browser session including the default one.
+  def select_in(browser, selector)
+    Nokogiri::HTML(browser.response.body).css selector
+  end
+
+  def hidden_fields_of(browser, selector)
+    select_in(browser, "#{selector} input[type=hidden]").to_h { |input| [input['name'], input['value']] }
+  end
+
+  # The stash of a confirmation page rendered in any browser session.
+  def stashed_continuation_of(browser)
+    form = select_in(browser, 'form#saml-sudo-reauth-form').first
+    assert form, 'the SAML confirmation page must be shown'
+
+    { value: form['data-saml-sudo-stash'],
+      key: form['data-saml-sudo-stash-key'],
+      back_url: hidden_fields_of(browser, 'form#saml-sudo-reauth-form')['back_url'] }
+  end
+
+  # The whole tail of the flow, in any browser session: the IdP callback, the
+  # resume page it redirects to, the restored form and the explicit continue.
+  def complete_continuation(browser, stash, idp_location)
+    browser.post RedmineSaml::CALLBACK_PATH, params: { RelayState: relay_state_of(idp_location) }
+    assert_equal 302, browser.response.status, 'the callback has to redirect to the resume page'
+    browser.get browser.response.location
+    assert_equal 200, browser.response.status
+
+    resume = select_in(browser, 'form#saml-sudo-resume-form').first
+    assert resume, 'the resume form must be rendered'
+    fields = hidden_fields_of browser, 'form#saml-sudo-resume-form'
+    fields['continuation'] = stash[:value]
+    browser.post resume['action'], params: fields
+    assert_equal 200, browser.response.status
+
+    continue_form = select_in(browser, 'form#saml-sudo-continue-form').first
+    assert continue_form, 'the restored form must be shown'
+    browser.post continue_form['action'], params: hidden_fields_of(browser, 'form#saml-sudo-continue-form')
+  end
+
   def sudo_request_count
     Token.where(user_id: users(:users_001).id, action: RedmineSaml::SudoTokenStore::REQUEST_ACTION).count
+  end
+
+  def sudo_transaction_count
+    Token.where(action: RedmineSaml::SudoTokenStore::ACTION).count
   end
 
   # The IdP round trip. Returns the URL the callback actually redirected to, so
@@ -651,6 +838,31 @@ class SamlSudoContinuationTest < Redmine::IntegrationTest
     fields = css_select('form#saml-sudo-continue-form input[type=hidden]')
              .to_h { |input| [input['name'], input['value']] }
     post form['action'], params: fields
+  end
+
+  def session_cookie_name
+    Rails.application.config.session_options[:key]
+  end
+
+  def relative_location(location)
+    location.to_s.sub %r{\Ahttps?://[^/]+}, ''
+  end
+
+  def session_cookie
+    cookies[session_cookie_name]
+  end
+
+  def assert_no_session_cookie(actual)
+    set_cookie = Array(actual.headers['Set-Cookie']).join("\n")
+
+    assert_not_includes set_cookie, session_cookie_name,
+                        'a request that lost the transaction must not write the session cookie'
+  end
+
+  def assert_no_continuation_session_state
+    keys = session.to_hash.keys.map(&:to_s).grep(/continuation/i)
+
+    assert_empty keys, "the session must carry no continuation state, found #{keys.inspect}"
   end
 
   def assert_resume_unavailable(actual = response)

@@ -4,6 +4,7 @@ require 'json'
 require 'securerandom'
 
 require_relative 'sudo_context'
+require_relative 'sudo_session'
 
 module RedmineSaml
   # Browser side continuation of the request that triggered a SAML Sudo Mode
@@ -31,13 +32,6 @@ module RedmineSaml
   class SudoContinuation
     VERSION = 1
     PURPOSE = 'redmine_saml/sudo_continuation'
-
-    # Per login session secret that binds a continuation to the session it was
-    # created in. Written only when a continuation is actually created, so a
-    # Redmine that never shows a SAML Sudo confirmation never stores it, and
-    # removed with the rest of the session by reset_session.
-    SESSION_KEY = 'redmine_saml_sudo_continuation'
-    SECRET_BYTES = 16
 
     # Long enough for an IdP round trip that includes a second factor, short
     # enough that a forgotten continuation stops working on its own. This is a
@@ -81,8 +75,16 @@ module RedmineSaml
         SecureRandom.hex KEY_BYTES
       end
 
-      def generate_secret
-        SecureRandom.hex SECRET_BYTES
+      # The secret a continuation of this login session is bound to.
+      #
+      # Derived from the Redmine session token rather than stored in the
+      # session: two genuinely concurrent tabs of one login session derive the
+      # same value, where a random secret written back with ||= would have
+      # given each of them a different one and only one of the two would have
+      # survived in the cookie. It also means this feature stores nothing in
+      # the session at all.
+      def session_secret(session)
+        SudoSession.continuation_secret session
       end
 
       def key?(value)

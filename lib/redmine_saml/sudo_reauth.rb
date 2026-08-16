@@ -138,26 +138,6 @@ module RedmineSaml
         enabled? && session[SESSION_KEY].present?
       end
 
-      # Returns the one live Sudo transaction owned by this Redmine login
-      # session and user. This is intentionally read only: callers use it to
-      # keep the existing single-flight transaction instead of replacing it
-      # when another browser tab asks to start Sudo re-authentication.
-      def active_transaction(session:, settings:, user_id:, now: Time.current)
-        return unless enabled?
-        return if session.blank?
-
-        context = SudoContext.load_context(
-          transaction_state(session[SESSION_KEY]),
-          settings: settings,
-          now: now
-        )
-        return unless context
-        return unless context['user_id'] == user_id
-        return unless SudoTokenStore.valid_transaction context, now: now
-
-        context
-      end
-
       # A SAML callback belongs to a Sudo transaction when the Sudo setup_phase
       # extension said so for this request, or when the session still holds a
       # transaction.

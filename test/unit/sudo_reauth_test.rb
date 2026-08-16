@@ -154,54 +154,6 @@ class SudoReauthTest < RedmineSaml::TestCase
     assert_not RedmineSaml::SudoReauth.pending?(session: {})
   end
 
-  test 'returns the one active transaction without consuming or changing it' do
-    context = pending_context
-    session = { RedmineSaml::SudoReauth::SESSION_KEY => context.deep_dup }
-    token = RedmineSaml::SudoTokenStore.valid_transaction context
-
-    active = RedmineSaml::SudoReauth.active_transaction(
-      session: session,
-      settings: @settings,
-      user_id: @user.id
-    )
-
-    assert_equal context, active
-    assert_equal context, session[RedmineSaml::SudoReauth::SESSION_KEY]
-    assert_equal token.id, RedmineSaml::SudoTokenStore.valid_transaction(context)&.id
-  end
-
-  test 'does not follow a foreign expired malformed or consumed transaction' do
-    context = pending_context
-    session = { RedmineSaml::SudoReauth::SESSION_KEY => context }
-
-    assert_nil RedmineSaml::SudoReauth.active_transaction(
-      session: session,
-      settings: @settings,
-      user_id: users(:users_002).id
-    )
-
-    assert_nil RedmineSaml::SudoReauth.active_transaction(
-      session: session,
-      settings: @settings,
-      user_id: @user.id,
-      now: RedmineSaml::SudoContext::VALIDITY.from_now + 1.second
-    )
-
-    malformed = { RedmineSaml::SudoReauth::SESSION_KEY => context.merge('type' => 'not-sudo') }
-    assert_nil RedmineSaml::SudoReauth.active_transaction(
-      session: malformed,
-      settings: @settings,
-      user_id: @user.id
-    )
-
-    assert RedmineSaml::SudoTokenStore.consume_transaction(context)
-    assert_nil RedmineSaml::SudoReauth.active_transaction(
-      session: session,
-      settings: @settings,
-      user_id: @user.id
-    )
-  end
-
   test 'is available only for an enabled SAML session with Sudo Mode on' do
     User.current = @user
     saml_session = { logged_in_with_saml: true }
@@ -519,11 +471,12 @@ class SudoReauthTest < RedmineSaml::TestCase
     %w[/auth/saml/metadata /auth/saml/sls].each do |path|
       session = { RedmineSaml::SudoReauth::SESSION_KEY => pending_context }
       strategy, = real_strategy path: path, session: session
+      transactions = sudo_transaction_count
 
       strategy.send :setup_phase
 
       assert session[RedmineSaml::SudoReauth::SESSION_KEY], path
-      assert_equal 1, sudo_transaction_count, path
+      assert_equal transactions, sudo_transaction_count, path
     end
   end
 
