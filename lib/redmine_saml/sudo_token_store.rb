@@ -90,8 +90,12 @@ module RedmineSaml
         # conditional DELETE, so any number of concurrent callers may run it
         # and at most one of them still wins the INSERT below.
         expire_lock value, now: now
-        insert_token user, value, now: now
+        insert_lock user, value, now: now
       rescue ActiveRecord::RecordNotUnique
+        # Another request of this login session inserted the row first. The
+        # violation was raised inside the savepoint of insert_lock and has
+        # already rolled it back by the time it arrives here, so the caller's
+        # transaction is untouched and usable.
         nil
       end
 
@@ -182,6 +186,23 @@ module RedmineSaml
       # rubocop:enable Naming/PredicateMethod
 
       private
+
+      # The INSERT that decides the winner, isolated in a transaction of its
+      # own. Inside an open transaction that is a savepoint, which is what
+      # makes losing the race survivable: PostgreSQL aborts the whole
+      # transaction on a constraint violation and refuses every later
+      # statement in it, so without the savepoint a losing acquisition would
+      # poison the surrounding transaction of the caller. Rolling back to the
+      # savepoint leaves that transaction usable.
+      #
+      # The violation is deliberately not rescued here. It has to leave this
+      # block so that the savepoint is rolled back first; acquire_transaction
+      # rescues it afterwards.
+      def insert_lock(user, value, now: Time.current)
+        Token.transaction requires_new: true do
+          insert_token user, value, now: now
+        end
+      end
 
       def insert_token(user, value, now: Time.current)
         Token.insert!({ user_id: user.id, action: ACTION, value: value,

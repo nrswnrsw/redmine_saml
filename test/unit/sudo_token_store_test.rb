@@ -116,10 +116,68 @@ class SudoTokenStoreTest < RedmineSaml::TestCase
 
     # The refusal comes from the unique index rather than from a check, which
     # is what makes it hold for genuinely concurrent requests as well.
+    #
+    # The violation is raised inside a savepoint of its own, exactly as
+    # acquire_transaction raises it: on PostgreSQL a constraint violation
+    # aborts the transaction it happens in and every later statement in it is
+    # refused, which would otherwise break the transactional fixtures of this
+    # very test rather than only this insert.
     assert_raises ActiveRecord::RecordNotUnique do
-      Token.insert!({ user_id: @user.id, action: RedmineSaml::SudoTokenStore::ACTION,
-                      value: value, created_on: Time.current, updated_on: Time.current })
+      Token.transaction requires_new: true do
+        Token.insert!({ user_id: @user.id, action: RedmineSaml::SudoTokenStore::ACTION,
+                        value: value, created_on: Time.current, updated_on: Time.current })
+      end
     end
+
+    assert_equal 1, sudo_transaction_count, 'the surrounding transaction has to stay usable'
+  end
+
+  # The regression the PostgreSQL matrix caught: a refused acquisition used to
+  # leave the surrounding transaction aborted, so every statement after it
+  # failed with PG::InFailedSqlTransaction. Nothing here is PostgreSQL
+  # specific, but on PostgreSQL these statements are what actually break.
+  test 'keeps the surrounding transaction usable after a refused acquisition' do
+    session = login_session 'tk-a'
+    first = RedmineSaml::SudoTokenStore.acquire_transaction @user, session
+
+    second = RedmineSaml::SudoTokenStore.acquire_transaction @user, session
+
+    assert_nil second, 'the second acquisition has to be refused'
+
+    # Every one of these would raise PG::InFailedSqlTransaction if the unique
+    # violation had aborted the transaction this test runs in.
+    assert_equal 1, Token.where(action: RedmineSaml::SudoTokenStore::ACTION).count
+    assert Token.exists?(first.id)
+    assert_not RedmineSaml::SudoTokenStore.transaction_pending?(login_session('tk-b'))
+    assert RedmineSaml::SudoTokenStore.transaction_pending?(session)
+    registry = RedmineSaml::SudoTokenStore.register_request @user, '_after-a-refused-acquisition'
+    assert registry.persisted?
+    assert RedmineSaml::SudoTokenStore.consume_transaction(build_context(first))
+    assert_equal 0, Token.where(action: RedmineSaml::SudoTokenStore::ACTION).count
+
+    # And the login session can acquire again afterwards.
+    assert RedmineSaml::SudoTokenStore.acquire_transaction(@user, session)
+  end
+
+  test 'keeps the surrounding transaction usable after a refused concurrent acquisition' do
+    session = login_session 'tk-a'
+    raced = false
+    competitor = nil
+
+    RedmineSaml::SudoTokenStore.stubs(:expire_lock).with do
+      unless raced
+        raced = true
+        competitor = RedmineSaml::SudoTokenStore.acquire_transaction @user, session
+      end
+      true
+    end
+
+    first = RedmineSaml::SudoTokenStore.acquire_transaction @user, session
+
+    assert raced
+    assert_equal 1, [first, competitor].compact.size
+    assert_equal 1, Token.where(action: RedmineSaml::SudoTokenStore::ACTION).count,
+                 'the loser must not have poisoned the transaction of the winner'
   end
 
   test 'lets only one of two concurrent acquisitions of one login session win' do
