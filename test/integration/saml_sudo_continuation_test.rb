@@ -408,6 +408,132 @@ class SamlSudoContinuationTest < Redmine::IntegrationTest
     assert_not_equal first[:value], second[:value]
   end
 
+  test 'single flights a second tab without replacing the first transaction' do
+    role_count = Role.count
+    saml_login
+    expire_sudo_mode!
+
+    first = submit_protected_form role_name: 'role from tab A'
+    post '/saml/sudo_reauth', params: { back_url: first[:back_url] }
+    assert_response :redirect
+    first_idp_location = response.location
+    first_context = session[RedmineSaml::SudoReauth::SESSION_KEY].to_h.deep_stringify_keys
+    first_token = RedmineSaml::SudoTokenStore.valid_transaction first_context
+    first_request_count = sudo_request_count
+
+    second = submit_protected_form role_name: 'role from tab B'
+    post '/saml/sudo_reauth', params: { back_url: second[:back_url] }
+
+    assert_equal first_context,
+                 session[RedmineSaml::SudoReauth::SESSION_KEY].to_h.deep_stringify_keys,
+                 'a later tab must not replace the pending transaction context'
+    assert_equal first_token.id,
+                 RedmineSaml::SudoTokenStore.valid_transaction(first_context)&.id,
+                 'a later tab must not cancel the pending transaction token'
+    assert_equal first_request_count, sudo_request_count,
+                 'a later tab must not issue another Sudo AuthnRequest'
+    assert_redirected_to second[:back_url]
+    second_resume_location = response.location
+
+    open_resume_page second_resume_location
+    restore_continuation second[:value]
+    assert_select 'input[name=?][value=?]', 'role[name]', 'role from tab B'
+    assert_includes response.body, ERB::Util.html_escape(I18n.t(:text_saml_sudo_continue_pending))
+
+    assert_no_difference 'Role.count' do
+      post RedmineSaml::CALLBACK_PATH, params: { RelayState: relay_state_of(first_idp_location) }
+    end
+    first_resume_location = response.location
+    first_callback = URI.parse first_resume_location
+    first_query = Rack::Utils.parse_query first_callback.query.to_s
+    assert_equal '/saml/sudo_resume', first_callback.path
+    assert_equal first[:key], first_query['key'],
+                 'the first callback must return to the first tab continuation'
+
+    open_resume_page second_resume_location
+    restore_continuation second[:value]
+    assert_select 'input[name=?][value=?]', 'role[name]', 'role from tab B'
+    submit_continue_form
+    assert_redirected_to '/roles'
+
+    open_resume_page first_resume_location
+    restore_continuation first[:value]
+    assert_select 'input[name=?][value=?]', 'role[name]', 'role from tab A'
+    submit_continue_form
+    assert_redirected_to '/roles'
+
+    assert_equal role_count + 2, Role.count
+    assert Role.find_by(name: 'role from tab A')
+    assert Role.find_by(name: 'role from tab B')
+  end
+
+  test 'lets a waiting tab retry after the first confirmation fails' do
+    saml_login
+    expire_sudo_mode!
+
+    first = submit_protected_form role_name: 'failed role from tab A'
+    post '/saml/sudo_reauth', params: { back_url: first[:back_url] }
+    assert_response :redirect
+
+    second = submit_protected_form role_name: 'retry role from tab B'
+    post '/saml/sudo_reauth', params: { back_url: second[:back_url] }
+    assert_redirected_to second[:back_url]
+    second_resume_location = response.location
+
+    assert_no_difference 'Role.count' do
+      post RedmineSaml::CALLBACK_PATH,
+           params: { RelayState: RedmineSaml::SudoReauth.relay_state('wrong-nonce') }
+    end
+    assert_nil session[RedmineSaml::SudoReauth::SESSION_KEY]
+
+    open_resume_page second_resume_location
+    restore_continuation second[:value]
+    assert_select 'input[name=?][value=?]', 'role[name]', 'retry role from tab B'
+    assert_includes response.body, ERB::Util.html_escape(I18n.t(:text_saml_sudo_continue_reconfirm))
+
+    assert_no_difference 'Role.count' do
+      submit_continue_form
+    end
+    retry_stash = stashed_continuation
+    retry_location = confirm_with_idp retry_stash, back_url: '/'
+    open_resume_page retry_location
+    restore_continuation retry_stash[:value]
+
+    assert_difference 'Role.count', 1 do
+      submit_continue_form
+    end
+    assert Role.find_by(name: 'retry role from tab B')
+  end
+
+  test 'starts a fresh transaction after the pending transaction expires' do
+    saml_login
+    expire_sudo_mode!
+
+    first = submit_protected_form role_name: 'expired role from tab A'
+    post '/saml/sudo_reauth', params: { back_url: first[:back_url] }
+    assert_response :redirect
+    first_context = session[RedmineSaml::SudoReauth::SESSION_KEY].to_h.deep_stringify_keys
+
+    travel_to RedmineSaml::SudoContext::VALIDITY.from_now + 1.second
+
+    second = submit_protected_form role_name: 'role from tab B after expiry'
+    post '/saml/sudo_reauth', params: { back_url: second[:back_url] }
+    assert_response :redirect
+    second_idp_location = response.location
+    second_context = session[RedmineSaml::SudoReauth::SESSION_KEY].to_h.deep_stringify_keys
+
+    assert_not_equal first_context['request_id'], second_context['request_id']
+    assert_nil RedmineSaml::SudoTokenStore.valid_transaction(first_context),
+               'the expired transaction must be removed before a new one starts'
+    assert RedmineSaml::SudoTokenStore.valid_transaction(second_context)
+
+    post RedmineSaml::CALLBACK_PATH, params: { RelayState: relay_state_of(second_idp_location) }
+    assert_response :redirect
+    location = URI.parse response.location
+    query = Rack::Utils.parse_query location.query.to_s
+    assert_equal second[:key], query['key']
+  end
+
   test 'keeps the local Redmine password prompt exactly as it was' do
     log_user 'admin', 'admin'
     expire_sudo_mode!
@@ -470,10 +596,14 @@ class SamlSudoContinuationTest < Redmine::IntegrationTest
   end
 
   # Submits the protected form whose Sudo Mode window has lapsed.
-  def submit_protected_form
-    post '/roles', params: { role: ROLE_PARAMS }, headers: { 'HTTP_REFERER' => '/roles/new' }
+  def submit_protected_form(role_name: ROLE_PARAMS[:name])
+    post '/roles', params: { role: ROLE_PARAMS.merge(name: role_name) }, headers: { 'HTTP_REFERER' => '/roles/new' }
     assert_response :success
     stashed_continuation
+  end
+
+  def sudo_request_count
+    Token.where(user_id: users(:users_001).id, action: RedmineSaml::SudoTokenStore::REQUEST_ACTION).count
   end
 
   # The IdP round trip. Returns the URL the callback actually redirected to, so

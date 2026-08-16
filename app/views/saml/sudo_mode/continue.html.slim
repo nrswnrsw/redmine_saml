@@ -1,10 +1,16 @@
 h2 = l :label_saml_sudo_continue_required
 
 p.nodata style="font-size: 1em;"
-  = @saml_sudo_confirmed ? l(:text_saml_sudo_continue_info) : l(:text_saml_sudo_continue_reconfirm)
+  - if @saml_sudo_transaction_pending
+    = l :text_saml_sudo_continue_pending
+  - elsif @saml_sudo_confirmed
+    = l :text_saml_sudo_continue_info
+  - else
+    = l :text_saml_sudo_continue_reconfirm
 
-/ Forgets the restored continuation, so returning to the resume page does not
-/ offer the same input a second time.
+/ Keeps the restored continuation until the user explicitly submits this form.
+/ In particular, a later tab must retain its input while the first tab finishes
+/ the one pending SAML confirmation shared by this Redmine login session.
 - content_for :header_tags do
   = javascript_include_tag 'saml_sudo_continuation', plugin: 'redmine_saml'
 

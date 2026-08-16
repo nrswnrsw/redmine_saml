@@ -397,7 +397,14 @@ class SamlSudoModeTest < Redmine::IntegrationTest
       # The registry once evicted by count at five entries per user, which
       # dropped the first transaction here and let its Response through as a
       # normal login. Every entry is still within REQUEST_VALIDITY.
-      transactions = Array.new(PREVIOUS_COUNT_LIMIT + 3) { start_real_sudo_transaction }
+      transaction_count = PREVIOUS_COUNT_LIMIT + 3
+      transactions = Array.new transaction_count do
+        transaction = start_real_sudo_transaction
+        post RedmineSaml::CALLBACK_PATH,
+             params: { SAMLResponse: transaction[:response], RelayState: transaction[:relay_state] }
+        assert_response :redirect
+        transaction
+      end
 
       transactions.each do |transaction|
         assert RedmineSaml::SudoTokenStore.request_registered?(transaction[:request_id]),

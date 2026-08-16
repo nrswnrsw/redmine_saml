@@ -51,6 +51,16 @@ module RedmineSaml
         def saml_sudo_reauth
           return head :method_not_allowed unless request.request_method == 'POST'
 
+          requested_return_url = validate_back_url(params[:back_url].to_s) || home_path
+          if active_saml_sudo_reauth_transaction
+            # One Redmine login session has one SAML Sudo transaction. A later
+            # tab keeps its own continuation in sessionStorage and returns to
+            # its own resume page, while the first tab completes the shared
+            # confirmation. Nothing about the first transaction is touched.
+            logger.info 'Kept the pending SAML sudo re-authentication for a later tab'
+            return redirect_to requested_return_url
+          end
+
           cancel_saml_sudo_reauth
           # The AuthnRequest is built from the configured SAML settings, used
           # unchanged, so the plugin never adds or removes an authentication
@@ -72,7 +82,7 @@ module RedmineSaml
             request_id: authn_request.uuid,
             nonce: nonce,
             token: token,
-            return_url: validate_back_url(params[:back_url].to_s) || home_path,
+            return_url: requested_return_url,
             saml_uid: session['saml_uid'],
             saml_session_index: session['saml_session_index'],
             settings: settings
@@ -120,6 +130,7 @@ module RedmineSaml
           # Read only: what the resumed request is allowed to do is decided by
           # Redmine's own Sudo Mode when that request arrives, not here.
           @saml_sudo_confirmed = sudo_timestamp_valid?
+          @saml_sudo_transaction_pending = active_saml_sudo_reauth_transaction.present?
           render 'saml/sudo_mode/continue'
         end
 
@@ -432,6 +443,18 @@ module RedmineSaml
 
         def saml_sudo_reauth_pending?
           RedmineSaml::SudoReauth.pending? session: session
+        end
+
+        # The session-side context, its user binding and its server-side Token
+        # must all still be valid before a later tab is treated as a follower.
+        # A malformed, stale or expired context therefore falls through to the
+        # existing cancellation path and a fresh transaction can start.
+        def active_saml_sudo_reauth_transaction
+          RedmineSaml::SudoReauth.active_transaction(
+            session: session,
+            settings: omniauth_saml_settings,
+            user_id: User.current.id
+          )
         end
 
         # The Sudo setup_phase extension fails a Sudo callback closed with a

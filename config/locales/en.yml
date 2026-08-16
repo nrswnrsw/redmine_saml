@@ -23,6 +23,10 @@ en:
   text_saml_sudo_continue_info: >-
     Your identity was confirmed and the input of the page you submitted was
     restored below. Nothing has been changed yet: continue to submit it.
+  text_saml_sudo_continue_pending: >-
+    A SAML confirmation is already in progress in another tab. Complete it
+    there, then return here and continue. Your restored input has not been
+    submitted.
   text_saml_sudo_continue_reconfirm: >-
     The input of the page you submitted was restored below and nothing has been
     changed yet. The confirmation is no longer valid, so continuing asks you to

@@ -109,25 +109,31 @@
     HTMLFormElement.prototype.submit.call(form);
   }
 
-  // Continue page: the input is on screen now, so the stored copy is dropped.
-  function forgetRestored() {
+  // Continue page: keep the stored copy while the restored input is waiting on
+  // screen. A second tab can be waiting for the one SAML confirmation already
+  // in progress in another tab. Drop it only when the user explicitly submits
+  // the restored form.
+  function forgetOnContinue() {
     var node = document.getElementById('saml-sudo-continue');
+    var form = document.getElementById('saml-sudo-continue-form');
 
-    if (!node) {
+    if (!node || !form) {
       return;
     }
 
     var key = node.getAttribute('data-saml-sudo-forget-key');
 
     if (key) {
-      forget(key);
+      form.addEventListener('submit', function () {
+        forget(key);
+      });
     }
   }
 
   function run() {
     stashOnConfirm();
     restore();
-    forgetRestored();
+    forgetOnContinue();
   }
 
   if (document.readyState === 'loading') {
