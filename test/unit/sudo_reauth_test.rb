@@ -471,11 +471,12 @@ class SudoReauthTest < RedmineSaml::TestCase
     %w[/auth/saml/metadata /auth/saml/sls].each do |path|
       session = { RedmineSaml::SudoReauth::SESSION_KEY => pending_context }
       strategy, = real_strategy path: path, session: session
+      transactions = sudo_transaction_count
 
       strategy.send :setup_phase
 
       assert session[RedmineSaml::SudoReauth::SESSION_KEY], path
-      assert_equal 1, sudo_transaction_count, path
+      assert_equal transactions, sudo_transaction_count, path
     end
   end
 

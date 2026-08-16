@@ -21,7 +21,7 @@ module RedmineSaml
                       only: %i[login_with_saml_redirect login_with_saml_callback redirect_after_saml_logout]
         before_action :verify_authenticity_token,
                       except: %i[login_with_saml_callback redirect_after_saml_logout]
-        before_action :require_saml_sudo_reauth_available, only: %i[saml_sudo_reauth]
+        before_action :require_saml_sudo_reauth_available, only: %i[saml_sudo_reauth saml_sudo_resume]
       end
 
       module InstanceOverwriteMethods
@@ -51,7 +51,19 @@ module RedmineSaml
         def saml_sudo_reauth
           return head :method_not_allowed unless request.request_method == 'POST'
 
-          cancel_saml_sudo_reauth
+          requested_return_url = validate_back_url(params[:back_url].to_s) || home_path
+          # One Redmine login session has one SAML Sudo transaction, and which
+          # request gets it is decided by a single INSERT on the unique
+          # tokens.value index rather than by a check against the session. The
+          # session cookie cannot arbitrate here: two genuinely concurrent tabs
+          # read the same snapshot of it, so both would pass a check and both
+          # would start a transaction. A later tab keeps its own continuation
+          # in sessionStorage and returns to its own resume page, while the
+          # first tab completes the shared confirmation. Nothing about the
+          # first transaction is touched.
+          token = RedmineSaml::SudoTokenStore.acquire_transaction User.current, session
+          return follow_saml_sudo_reauth requested_return_url if token.nil?
+
           # The AuthnRequest is built from the configured SAML settings, used
           # unchanged, so the plugin never adds or removes an authentication
           # condition such as ForceAuthn or IsPassive on its own. With a static
@@ -62,7 +74,6 @@ module RedmineSaml
           settings = omniauth_saml_settings
           authn_request = OneLogin::RubySaml::Authrequest.new
           nonce = RedmineSaml::SudoReauth.generate_nonce
-          token = RedmineSaml::SudoTokenStore.create_transaction User.current
           # Registered before the AuthnRequest can reach the IdP, so every
           # Response the IdP could produce for it is already recognisable as a
           # Sudo one. The entry outlives this transaction on purpose.
@@ -72,7 +83,7 @@ module RedmineSaml
             request_id: authn_request.uuid,
             nonce: nonce,
             token: token,
-            return_url: validate_back_url(params[:back_url].to_s) || home_path,
+            return_url: requested_return_url,
             saml_uid: session['saml_uid'],
             saml_session_index: session['saml_session_index'],
             settings: settings
@@ -88,6 +99,42 @@ module RedmineSaml
           session.delete RedmineSaml::SudoReauth::SESSION_KEY
           logger.warn "SAML sudo re-authentication could not be started: #{e.class}"
           redirect_to home_path
+        end
+
+        # Offers the input of the request that triggered a Sudo confirmation
+        # back to the user after the IdP round trip.
+        #
+        # This action never changes anything and is never a decision about
+        # whether the original request may run. It reads the continuation the
+        # browser kept, in this browser tab only, and renders the input back as
+        # an ordinary Redmine form. Submitting that form is a separate, explicit
+        # user action which produces a normal Redmine request: it carries a
+        # fresh CSRF token and passes through Redmine's own Sudo Mode check
+        # again, so a successful SAML callback is on its own never a reason for
+        # anything to be changed.
+        def saml_sudo_resume
+          return head :method_not_allowed unless %w[GET POST].include? request.request_method
+
+          @saml_sudo_back_url = validate_back_url(params[:back_url].to_s) || home_path
+          @saml_sudo_continuation_key = saml_sudo_continuation_key
+          no_store
+          return render 'saml/sudo_mode/resume' if request.request_method == 'GET'
+
+          continuation = RedmineSaml::SudoContinuation.load params[:continuation],
+                                                            user_id: User.current.id,
+                                                            session_secret: saml_sudo_continuation_secret
+          return render_saml_sudo_resume_unavailable if continuation.blank?
+
+          @saml_sudo_continuation_method = continuation['request_method']
+          @saml_sudo_continuation_path = continuation['path']
+          @saml_sudo_continuation_fields = ActionController::Parameters.new continuation['fields']
+          # Read only: what the resumed request is allowed to do is decided by
+          # Redmine's own Sudo Mode when that request arrives, not here.
+          @saml_sudo_confirmed = sudo_timestamp_valid?
+          # Read from the server side, so a tab whose cookie does not yet know
+          # about a concurrently started transaction still sees it.
+          @saml_sudo_transaction_pending = RedmineSaml::SudoTokenStore.transaction_pending? session
+          render 'saml/sudo_mode/continue'
         end
 
         def login_with_saml_callback
@@ -529,7 +576,7 @@ module RedmineSaml
 
           # Consumed before the identity checks so that a rejected transaction
           # cannot be retried with the same assertion.
-          return 'stale sudo transaction' unless RedmineSaml::SudoTokenStore.consume_transaction context
+          return 'stale sudo transaction' unless consume_saml_sudo_reauth_transaction context
 
           auth = request.env['omniauth.auth']
           return 'missing SAML authentication' if auth.blank?
@@ -550,12 +597,63 @@ module RedmineSaml
           nil
         end
 
+        # A request that lost the atomic acquisition must not write the session
+        # either, for the same reason a callback that lost the consume must not.
+        #
+        # Both requests of a genuinely simultaneous start read the same session
+        # snapshot, and this one only read from it. Reading is enough: the
+        # cookie store commits a session that was merely loaded, so this
+        # response would send back the snapshot from before the winner stored
+        # its Sudo context, and a browser that receives it last would keep that
+        # older cookie and lose the transaction the winner just started.
+        #
+        # This is the follower branch only. A request that acquires the
+        # transaction stores its context in the session exactly as before.
+        def follow_saml_sudo_reauth(return_url)
+          request.session_options[:skip] = true
+          logger.info 'Kept the pending SAML sudo re-authentication for a later tab'
+          redirect_to return_url
+        end
+
+        # The single conditional DELETE that decides which of any number of
+        # concurrent callbacks owns this transaction. Losing it is remembered,
+        # because a loser must leave the session alone entirely.
+        def consume_saml_sudo_reauth_transaction(context)
+          consumed = RedmineSaml::SudoTokenStore.consume_transaction context
+          @saml_sudo_reauth_consume_lost = !consumed
+          consumed
+        end
+
         def reject_saml_sudo_reauth(reason)
           state = saml_sudo_reauth_state
           logger.warn "SAML sudo re-authentication rejected: #{reason}"
+          return discard_saml_sudo_reauth_response state if @saml_sudo_reauth_consume_lost
+
           restore_saml_sudo_reauth_session state
           RedmineSaml::SudoTokenStore.destroy_transaction state
           flash[:error] = l :error_saml_sudo_reauth_failed
+          redirect_to saml_sudo_reauth_return_path(state)
+        end
+
+        # A callback that did not win the transaction must not write the
+        # session at all.
+        #
+        # Another request of the same login session owns this transaction and
+        # is refreshing the Sudo timestamp for it. With the cookie store, this
+        # response would otherwise send a Set-Cookie built from the snapshot it
+        # read before that request committed, and the browser would keep the
+        # last response it received: the winner's Sudo timestamp, SAML identity
+        # and SLO context would be silently rolled back by the loser.
+        #
+        # Skipping the session commit is what Rack itself offers for exactly
+        # this, and it covers every write this request made, including the ones
+        # made before it was known to be a loser: the transaction entry removed
+        # from the session, the SAML identifiers omniauth-saml overwrote, and
+        # any flash. Nothing is restored, nothing is cancelled, nothing is
+        # written; the response only redirects.
+        def discard_saml_sudo_reauth_response(state)
+          request.session_options[:skip] = true
+          logger.info 'Discarded a SAML sudo callback that lost its transaction'
           redirect_to saml_sudo_reauth_return_path(state)
         end
 
@@ -613,6 +711,29 @@ module RedmineSaml
         def saml_sudo_reauth_return_path(state)
           return_url = state.is_a?(Hash) ? state['return_url'] : nil
           validate_back_url(return_url.to_s) || home_path
+        end
+
+        # The sessionStorage key of the continuation this page is about. It is
+        # a storage identifier rather than a secret, but only the generated
+        # shape is ever echoed back into the page.
+        def saml_sudo_continuation_key
+          key = params[:key].to_s
+          key if RedmineSaml::SudoContinuation.key? key
+        end
+
+        # The continuation is bound to this secret, so a continuation of another
+        # login session is rejected even for the same user. Read only here: a
+        # session that never created one simply has nothing to resume.
+        def saml_sudo_continuation_secret
+          RedmineSaml::SudoContinuation.session_secret session
+        end
+
+        # Rendered without the restore script, so a continuation that cannot be
+        # read never puts the page into a submit loop.
+        def render_saml_sudo_resume_unavailable
+          @saml_sudo_continuation_unavailable = true
+          logger.info 'SAML sudo continuation could not be restored'
+          render 'saml/sudo_mode/resume'
         end
 
         def active_saml_logout_session?

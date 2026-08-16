@@ -1,0 +1,23 @@
+h2 = l :label_saml_sudo_resume_required
+
+- if @saml_sudo_continuation_unavailable
+  p.nodata style="font-size: 1em;" = l :text_saml_sudo_resume_unavailable
+  p.buttons = link_to l(:button_cancel), @saml_sudo_back_url
+- else
+  / The restore script only fills the hidden field below from the sessionStorage
+  / of this tab and submits it. Without it, or without a stored continuation,
+  / the page stays a plain form whose submit ends on the message above.
+  - content_for :header_tags do
+    = javascript_include_tag 'saml_sudo_continuation', plugin: 'redmine_saml'
+
+  p.nodata style="font-size: 1em;" = l :text_saml_sudo_resume_info
+
+  #saml-sudo-resume
+    = form_with url: saml_sudo_resume_path, method: :post, local: true, id: 'saml-sudo-resume-form',
+                data: { saml_sudo_restore_key: @saml_sudo_continuation_key } do |f|
+      = f.hidden_field :continuation, value: '', id: 'saml-sudo-continuation'
+      = f.hidden_field :key, value: @saml_sudo_continuation_key, id: nil
+      = f.hidden_field :back_url, value: @saml_sudo_back_url, id: nil
+      p.buttons
+        = f.button l(:button_saml_sudo_resume), type: 'submit'
+        = link_to l(:button_cancel), @saml_sudo_back_url

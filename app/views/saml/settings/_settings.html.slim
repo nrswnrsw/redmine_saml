@@ -16,3 +16,18 @@ p
   = label_tag 'settings[onthefly_creation]', l(:label_onthefly_creation)
   = hidden_field_tag 'settings[onthefly_creation]', 0, id: nil
   = check_box_tag 'settings[onthefly_creation]', 1, @settings[:onthefly_creation].to_s == '1'
+
+p
+  = label_tag 'settings[saml_sudo_reauth_title]', l(:label_saml_sudo_reauth_title)
+  = text_field_tag 'settings[saml_sudo_reauth_title]', @settings[:saml_sudo_reauth_title], size: 60
+
+p
+  = label_tag 'settings[saml_sudo_reauth_text]', l(:label_saml_sudo_reauth_text)
+  = text_area_tag 'settings[saml_sudo_reauth_text]', @settings[:saml_sudo_reauth_text], rows: 4, cols: 60
+
+p
+  = label_tag 'settings[saml_sudo_reauth_button_label]', l(:label_saml_sudo_reauth_button_label)
+  = text_field_tag 'settings[saml_sudo_reauth_button_label]', @settings[:saml_sudo_reauth_button_label], size: 60
+
+p
+  em.info = l :text_saml_sudo_reauth_customization

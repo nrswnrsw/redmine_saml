@@ -234,13 +234,49 @@ This behavior needs no configuration:
 - No new IdP configuration, no additional ACS URL and no additional SAML provider. The existing `/auth/saml/callback` endpoint is reused.
 - No database migration. The short-lived server-side record of a Sudo transaction uses Redmine's existing tokens table.
 
+Optional wording of the confirmation prompt:
+
+The three texts of the confirmation prompt can be changed in *Administration → Plugins → Redmine SAML*:
+
+| Setting | Plugin setting key | Prompt element |
+| --- | --- | --- |
+| Sudo Mode confirmation heading | `saml_sudo_reauth_title` | the heading of the prompt |
+| Sudo Mode confirmation text | `saml_sudo_reauth_text` | the explanation below the heading |
+| Sudo Mode confirmation button label | `saml_sudo_reauth_button_label` | the label of the confirmation button |
+
+All three are **optional** and blank by default:
+
+- **Leave a setting blank and the prompt keeps the default wording of the current language.** Each text falls back on its own, so configuring one of them does not change the other two, and an installation that configures none of them shows exactly the prompt it showed before these settings existed, in every language. No default wording is copied into the settings.
+- The values are **plain text**. HTML is not interpreted: it is escaped and shown as the characters that were entered.
+- This applies to the SAML confirmation prompt only, in both its page and modal form. The local Redmine password prompt and the SAML login page are unaffected.
+
+Keeping what you typed:
+
+Redmine's own password prompt keeps the fields of the request it interrupted in hidden fields of that same page. A SAML confirmation leaves Redmine for the IdP, so that page is gone when you come back. To avoid losing a form you spent a long time on, the fields Redmine already selected for its own prompt are sealed into one opaque value that your browser keeps in the `sessionStorage` of that one tab while it visits the IdP. When you return, Redmine offers them back on a resume page and you press a button to submit them.
+
+This needs no configuration and adds no setting, no migration and no server-side storage.
+
+- **The confirmation never submits anything for you.** Coming back from the IdP only refreshes the Sudo Mode timestamp, exactly as before. The restored form is an ordinary Redmine form with a fresh CSRF token, and submitting it is a separate, explicit action of yours. A repeated or replayed SAML callback, or a reloaded page, therefore cannot cause the original change to happen.
+- **The resumed request is checked like any other request.** It passes through Redmine's own Sudo Mode check again, so a successful SAML confirmation is never by itself the reason a change is allowed. If the confirmation lapsed again in the meantime, Redmine simply asks once more and the input is kept again.
+- **The sealed value is unreadable and unforgeable outside your session.** It is encrypted and authenticated with `ActiveSupport::MessageEncryptor` using a key derived from your Redmine `secret_key_base`, and it is bound to the user and the login session that created it, with an expiry of 15 minutes. A modified, expired or foreign value is refused and nothing is restored.
+- **The saved input is per tab and short lived.** Each continuation gets its own storage key, so two tabs never overwrite each other's input. The saved copy is removed when its restored form is explicitly submitted, and the browser drops any remaining copies when the tab closes.
+- **SAML confirmation is single-flight per Redmine login session.** If one tab already has a live SAML Sudo transaction, pressing the confirmation button in another tab does not cancel or replace it and does not send a second `AuthnRequest`. The later tab restores and keeps its own input while asking you to finish the confirmation already in progress. A successful confirmation refreshes the Sudo timestamp for the whole Redmine login session, so you can then return to each tab and explicitly continue its own restored request. If the first confirmation fails or expires, continuing from a waiting tab asks for a new confirmation; it is not permanently blocked. Which request gets the transaction is decided by the unique index on Redmine's existing `tokens` table, so this holds for genuinely simultaneous tabs as well, on every database Redmine supports.
+- **The scope is one login session, not one user.** A second browser, device or private window signs in as its own Redmine login session and gets its own SAML Sudo transaction, so confirming in one of them never cancels a confirmation in progress in another. The plugin uses the Redmine session token that Redmine already issues for every login session; it is only ever used as a domain-separated digest and never appears in a page, a URL, a log or a SAML message.
+
+Limitations, in all of which the behaviour is simply the one from 1.2.0, with nothing changed and nothing restored:
+
+- The input is kept for `POST`, `PUT`, `PATCH` and `DELETE` requests only. A `GET` has nothing worth keeping and its path is untouched.
+- It needs JavaScript and a usable `sessionStorage`. Where either is unavailable the resume page says so and offers a link back, rather than failing.
+- The Sudo modal shown for remote (XHR) forms is not resumed. The tab navigates away to the IdP, so the page that would have received the response no longer exists when it returns.
+- A raw multipart file upload is not continued. Redmine's normal attachment flow uploads files before the form is submitted and sends only their tokens, which are kept like any other field; the raw-upload fallback used when JavaScript is off is refused rather than sealed into a browser store.
+
 Details worth knowing:
 
 - The transaction only refreshes the Sudo Mode timestamp. It never signs the user in again: the Redmine session, its session token, the autologin cookie and `last_login_on` are untouched, and the SAML `on_login` hook and on-the-fly user creation do not run. A SAML identity the confirmation response does not carry is kept as it was, so a confirmation never degrades the NameID or SessionIndex of the session.
 - A Sudo transaction is recorded server side for five minutes. While that record is valid, the SAML Response answering it is still recognised as a Sudo confirmation after the transaction was used or cancelled, and also in a browser session that never started it, so it is not processed as a normal SAML login. The record then expires; it is a short-lived identification of Sudo transactions, not a change to how SAML Responses are handled in general. Nothing about normal SAML login changes: a login response, including an IdP-initiated one without an `InResponseTo`, is handled exactly as before.
 - Starting a normal SAML login supersedes a pending Sudo confirmation of the same session, so the login completes normally.
 - The re-authentication only succeeds when the IdP returns the same Redmine user. If a different account is used at the IdP, the confirmation fails and the current Redmine session is kept as it is; it is never replaced by the other account.
-- The original request is not resubmitted after returning from the IdP. Redmine returns to a validated page and the action has to be repeated there.
+- The original request is not resubmitted automatically after returning from the IdP. When a continuation is available, Redmine restores it on a validated page and the user explicitly submits it from there; otherwise the action has to be repeated on the original page.
 - A local Redmine login on a SAML-enabled Redmine keeps the standard Redmine password prompt.
 - While Sudo Mode is disabled, this feature is not active in any form: Redmine never asks for confirmation, no SAML confirmation transaction can be started, and nothing about SAML login, logout or Single Logout changes.
 

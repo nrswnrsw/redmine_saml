@@ -42,6 +42,46 @@ class SamlSettingsControllerTest < RedmineSaml::ControllerTest
                     'checkbox', 'settings[onthefly_creation]', '1', 'checked'
     end
 
+    should 'render the optional SAML Sudo Mode display texts' do
+      change_saml_settings saml_sudo_reauth_title: 'Confirm with the company IdP',
+                           saml_sudo_reauth_text: 'An SSO confirmation is required.',
+                           saml_sudo_reauth_button_label: 'Continue to the company IdP'
+
+      get :plugin, params: { id: 'redmine_saml' }
+
+      assert_response :success
+      assert_select 'input[type=?][name=?][value=?]',
+                    'text', 'settings[saml_sudo_reauth_title]', 'Confirm with the company IdP'
+      assert_select 'textarea[name=?]', 'settings[saml_sudo_reauth_text]',
+                    text: 'An SSO confirmation is required.'
+      assert_select 'input[type=?][name=?][value=?]',
+                    'text', 'settings[saml_sudo_reauth_button_label]', 'Continue to the company IdP'
+    end
+
+    should 'render blank SAML Sudo Mode display texts while none is configured' do
+      get :plugin, params: { id: 'redmine_saml' }
+
+      assert_response :success
+      assert_select 'input[type=?][name=?][value=?]', 'text', 'settings[saml_sudo_reauth_title]', ''
+      assert_select 'textarea[name=?]', 'settings[saml_sudo_reauth_text]', text: ''
+      assert_select 'input[type=?][name=?][value=?]', 'text', 'settings[saml_sudo_reauth_button_label]', ''
+    end
+
+    should 'escape HTML in the configured SAML Sudo Mode display texts' do
+      change_saml_settings saml_sudo_reauth_title: '<script>alert("title")</script>',
+                           saml_sudo_reauth_text: '<script>alert("text")</script>'
+
+      get :plugin, params: { id: 'redmine_saml' }
+
+      assert_response :success
+      assert_not_includes response.body, '<script>alert("title")</script>'
+      assert_not_includes response.body, '<script>alert("text")</script>'
+      assert_select 'input[type=?][name=?][value=?]',
+                    'text', 'settings[saml_sudo_reauth_title]', '<script>alert("title")</script>'
+      assert_select 'textarea[name=?]', 'settings[saml_sudo_reauth_text]',
+                    text: '<script>alert("text")</script>'
+    end
+
     should 'redact a legacy SP private key without hiding non-secret SAML settings' do
       configured_saml = RedmineSaml.configured_saml
       configured_saml.delete :sp_cert_multi
@@ -136,6 +176,46 @@ class SamlSettingsControllerTest < RedmineSaml::ControllerTest
       assert_equal 'Updated SSO', Setting.plugin_redmine_saml[:saml_login_label]
       assert_equal '1', Setting.plugin_redmine_saml[:replace_redmine_login]
       assert_equal '0', Setting.plugin_redmine_saml[:onthefly_creation]
+    end
+
+    should 'save the optional SAML Sudo Mode display texts' do
+      post :plugin,
+           params: {
+             id: 'redmine_saml',
+             settings: {
+               saml_enabled: '1',
+               saml_sudo_reauth_title: 'Confirm with the company IdP',
+               saml_sudo_reauth_text: 'An SSO confirmation is required.',
+               saml_sudo_reauth_button_label: 'Continue to the company IdP'
+             }
+           }
+
+      assert_redirected_to plugin_settings_path(Redmine::Plugin.find('redmine_saml'))
+      assert_equal 'Confirm with the company IdP', Setting.plugin_redmine_saml[:saml_sudo_reauth_title]
+      assert_equal 'An SSO confirmation is required.', Setting.plugin_redmine_saml[:saml_sudo_reauth_text]
+      assert_equal 'Continue to the company IdP', Setting.plugin_redmine_saml[:saml_sudo_reauth_button_label]
+    end
+
+    should 'clear the optional SAML Sudo Mode display texts again' do
+      change_saml_settings saml_sudo_reauth_title: 'Confirm with the company IdP',
+                           saml_sudo_reauth_text: 'An SSO confirmation is required.',
+                           saml_sudo_reauth_button_label: 'Continue to the company IdP'
+
+      post :plugin,
+           params: {
+             id: 'redmine_saml',
+             settings: {
+               saml_enabled: '1',
+               saml_sudo_reauth_title: '',
+               saml_sudo_reauth_text: '',
+               saml_sudo_reauth_button_label: ''
+             }
+           }
+
+      assert_redirected_to plugin_settings_path(Redmine::Plugin.find('redmine_saml'))
+      assert_equal '', Setting.plugin_redmine_saml[:saml_sudo_reauth_title]
+      assert_equal '', Setting.plugin_redmine_saml[:saml_sudo_reauth_text]
+      assert_equal '', Setting.plugin_redmine_saml[:saml_sudo_reauth_button_label]
     end
   end
 end
