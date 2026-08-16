@@ -11,7 +11,7 @@ require_relative 'redmine_saml/sudo_continuation'
 require_relative 'redmine_saml/sudo_reauth'
 
 module RedmineSaml
-  VERSION = '1.2.0'
+  VERSION = '1.3.0'
 
   METADATA_PATH = '/auth/saml/metadata'
   CALLBACK_PATH = '/auth/saml/callback'
