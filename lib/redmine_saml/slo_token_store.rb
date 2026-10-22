@@ -42,8 +42,7 @@ module RedmineSaml
       end
 
       # Reports whether this mutating operation atomically consumed the exact SLO Token.
-      # rubocop:disable Naming/PredicateMethod
-      def consume_transaction(context, now: Time.current)
+      def consume_transaction(context, now: Time.current) # rubocop:disable Naming/PredicateMethod
         token = valid_transaction context, now: now
         return false unless token
 
@@ -51,7 +50,6 @@ module RedmineSaml
              .where(created_on: (now - TRANSACTION_VALIDITY)..)
              .delete_all == 1
       end
-      # rubocop:enable Naming/PredicateMethod
 
       def session_token(user_id:, value:)
         Token.find_by user_id: user_id, action: 'session', value: value
@@ -67,8 +65,7 @@ module RedmineSaml
       end
 
       # Reports whether this mutating operation atomically consumed the exact session Token.
-      # rubocop:disable Naming/PredicateMethod
-      def consume_session(context, token)
+      def consume_session(context, token) # rubocop:disable Naming/PredicateMethod
         return false unless token
 
         Token.where(
@@ -78,7 +75,6 @@ module RedmineSaml
           value: token.value
         ).delete_all == 1
       end
-      # rubocop:enable Naming/PredicateMethod
 
       private
 

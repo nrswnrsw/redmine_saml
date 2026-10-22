@@ -100,14 +100,12 @@ module RedmineSaml
       # whether the provider is the one this plugin registered.
       #
       # Reports whether this call installed the extension.
-      # rubocop:disable Naming/PredicateMethod
-      def install_setup_phase!
+      def install_setup_phase! # rubocop:disable Naming/PredicateMethod
         return false if ::OmniAuth::Strategies::SAML.include? SetupPhase
 
         ::OmniAuth::Strategies::SAML.prepend SetupPhase
         true
       end
-      # rubocop:enable Naming/PredicateMethod
 
       # SAML Sudo re-authentication exists exactly while Redmine's own Sudo
       # Mode does. Redmine 7.0 enables Sudo Mode by default; 6.0 and 6.1 only
@@ -118,11 +116,9 @@ module RedmineSaml
       # point returns immediately and nothing of the Sudo machinery runs.
       #
       # An explicit wrapper, so that the gate has one name of its own here.
-      # rubocop:disable Rails/Delegate
-      def enabled?
+      def enabled? # rubocop:disable Rails/Delegate
         ::Redmine::SudoMode.enabled?
       end
-      # rubocop:enable Rails/Delegate
 
       # True when the current request may offer SAML Sudo re-authentication.
       def available?(session:)
