@@ -156,6 +156,37 @@ class SamlSettingsControllerTest < RedmineSaml::ControllerTest
                    RedmineSaml.configured_saml.dig(:sp_cert_multi, :encryption, 0, :private_key)
       assert_equal 'VERY_SECRET_ALIAS_PRIVATE_KEY', RedmineSaml.configured_saml.dig(:sp_cert_multi, :encryption, 1, :key)
     end
+
+    should 'show the SAML test links on the information tab while SAML is enabled' do
+      change_saml_settings saml_enabled: '1'
+
+      get :plugin, params: { id: 'redmine_saml', tab: 'info' }
+
+      assert_response :success
+      assert_select 'h3', text: I18n.t(:label_saml_test_plural)
+      assert_select 'a', text: RedmineSaml::METADATA_PATH
+    end
+
+    should 'hide the SAML test links on the information tab while SAML is disabled' do
+      change_saml_settings saml_enabled: '0'
+
+      get :plugin, params: { id: 'redmine_saml', tab: 'info' }
+
+      assert_response :success
+      assert_select 'h3', text: I18n.t(:label_saml_test_plural), count: 0
+      assert_select 'a', text: RedmineSaml::METADATA_PATH, count: 0
+    end
+
+    should 'hide the SAML test links on the information tab while saml_enabled is not set' do
+      Setting.plugin_redmine_saml = Setting.plugin_redmine_saml.except :saml_enabled
+      assert_nil Setting.plugin_redmine_saml[:saml_enabled]
+
+      get :plugin, params: { id: 'redmine_saml', tab: 'info' }
+
+      assert_response :success
+      assert_select 'h3', text: I18n.t(:label_saml_test_plural), count: 0
+      assert_select 'a', text: RedmineSaml::METADATA_PATH, count: 0
+    end
   end
 
   context 'POST plugin settings' do

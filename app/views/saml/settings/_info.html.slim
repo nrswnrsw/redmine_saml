@@ -30,7 +30,7 @@ em.info
 
 br
 
-- if @settings[:saml_enabled]
+- if @settings[:saml_enabled].to_s == '1'
   h3
     = l :label_saml_test_plural
 

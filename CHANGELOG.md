@@ -4,6 +4,14 @@ This file records notable user-facing changes to the maintained `nrswnrsw/redmin
 
 ## [Unreleased]
 
+### Fixed
+
+- The SAML test links on the Information tab of the plugin settings are no longer shown while SAML authentication is disabled. The tab now reads `saml_enabled` the same way as the settings checkbox does. Only the settings page is affected: SAML login was already blocked while the setting is disabled.
+
+### Maintenance
+
+- Corrected the README and the 1.1.0 upgrade notes, which stated that the plugin has no database migration. The plugin has one, inherited from the original plugin, which adds the `users.created_by_omniauth_saml` column; upgrading from `alphanodes/redmine_saml` adds no new one.
+
 ## [1.3.0] - 2026-08-16
 
 ### Added
@@ -122,7 +130,7 @@ Upgrading from `alphanodes/redmine_saml` 1.0.6 also involves the migration steps
 ### Upgrade notes for 1.0.6 users
 
 1. Check the Redmine version first. Redmine 6.0 or later is required, and the requirement applies at the moment Redmine loads this plugin version. On Redmine 5.x, do not start Redmine with this plugin version in place; plan the work so that Redmine is already on 6.0 or later the first time it starts with it. Both updates can be done in the same maintenance window. On Redmine 6.0 or later, no Redmine upgrade is needed for this reason.
-2. Back up the existing initializer and deployment configuration. This plugin adds no database migration of its own.
+2. Back up the existing initializer and deployment configuration. This version adds no new database migration; the plugin's only migration, which adds the `users.created_by_omniauth_saml` column, is inherited from the original plugin and is already applied on an existing installation.
 3. Preserve the existing initializer under `config/initializers/`.
 4. Replace the code in `plugins/redmine_saml` with the maintained repository version, keeping the directory name `redmine_saml`.
 5. Run `bundle install` from the Redmine root.
